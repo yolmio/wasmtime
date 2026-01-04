@@ -1530,6 +1530,30 @@
       (if-let true (has_avx512bw))
       (x64_vmovdqu8_zl addr))
 
+;; AVX-512VL: 256-bit vector loads (32 bytes)
+;; These rules have higher priority (3) to match before the generic multi_lane rule (0)
+;; Note: VMOVDQU32/64 are untyped moves and are safe for all 256-bit vector data.
+
+;; 64-bit x 4 lanes (I64X4, F64X4 = 256-bit) -> VMOVDQU64
+(rule 3 (x64_load (multi_lane 64 4) addr _ext_kind)
+      (if-let true (has_avx512vl))
+      (x64_vmovdqu64_yl addr))
+
+;; 32-bit x 8 lanes (I32X8, F32X8 = 256-bit) -> VMOVDQU32
+(rule 3 (x64_load (multi_lane 32 8) addr _ext_kind)
+      (if-let true (has_avx512vl))
+      (x64_vmovdqu32_yl addr))
+
+;; 16-bit x 16 lanes (I16X16 = 256-bit) -> VMOVDQU32
+(rule 3 (x64_load (multi_lane 16 16) addr _ext_kind)
+      (if-let true (has_avx512vl))
+      (x64_vmovdqu32_yl addr))
+
+;; 8-bit x 32 lanes (I8X32 = 256-bit) -> VMOVDQU32
+(rule 3 (x64_load (multi_lane 8 32) addr _ext_kind)
+      (if-let true (has_avx512vl))
+      (x64_vmovdqu32_yl addr))
+
 (rule 0 (x64_load (multi_lane _bits _lanes) addr _ext_kind)
       (x64_movdqu_load addr))
 

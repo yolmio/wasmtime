@@ -426,12 +426,14 @@
 ;; I32X16 masked load -> VMOVDQU32 with mask
 (rule 17 (lower (has_type (multi_lane 32 16) (x86_simd_masked_load flags mask passthru base offset)))
       (if-let true (has_avx512f))
-      (x64_512_masked_load_i32x16 (to_amode flags base offset) (put_in_reg mask) passthru))
+      (let ((kreg Reg (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))))
+        (x64_512_masked_load_i32x16 (to_amode flags base offset) kreg passthru)))
 
 ;; I64X8 masked load -> VMOVDQU64 with mask
 (rule 17 (lower (has_type (multi_lane 64 8) (x86_simd_masked_load flags mask passthru base offset)))
       (if-let true (has_avx512f))
-      (x64_512_masked_load_i64x8 (to_amode flags base offset) (put_in_reg mask) passthru))
+      (let ((kreg Reg (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))))
+        (x64_512_masked_load_i64x8 (to_amode flags base offset) kreg passthru)))
 
 ;; =============================================================================
 ;; AVX-512 Masked Store (x86_simd_masked_store)
@@ -443,12 +445,14 @@
 ;; I32X16 masked store -> VMOVDQU32 with mask
 (rule 17 (lower (x86_simd_masked_store flags mask value @ (value_type (multi_lane 32 16)) base offset))
       (if-let true (has_avx512f))
-      (side_effect (x64_512_masked_store_i32x16 (to_amode flags base offset) (put_in_reg mask) value)))
+      (let ((kreg Reg (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))))
+        (side_effect (x64_512_masked_store_i32x16 (to_amode flags base offset) kreg value))))
 
 ;; I64X8 masked store -> VMOVDQU64 with mask
 (rule 17 (lower (x86_simd_masked_store flags mask value @ (value_type (multi_lane 64 8)) base offset))
       (if-let true (has_avx512f))
-      (side_effect (x64_512_masked_store_i64x8 (to_amode flags base offset) (put_in_reg mask) value)))
+      (let ((kreg Reg (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))))
+        (side_effect (x64_512_masked_store_i64x8 (to_amode flags base offset) kreg value))))
 
 ;; =============================================================================
 ;; AVX-512 Gather (x86_simd_gather)
@@ -505,7 +509,7 @@
 ;; I64X8 with I32X8 indices (64-bit elements, 32-bit indices) -> VPSCATTERDQ
 (rule 17 (lower (x86_simd_scatter flags mask value @ (value_type (multi_lane 64 8)) base indices @ (value_type (multi_lane 32 8)) scale offset))
       (if-let true (has_avx512f))
-      (let ((kreg Reg (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask)))
+      (let ((kreg Reg (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask)))
             (scale_val u8 (uimm8_value scale))
             (disp i32 (i32_from_offset32 offset)))
         (side_effect (x64_512_vpscatterdq (put_in_reg base) (put_in_xmm indices) scale_val disp (put_in_xmm value) kreg))))
@@ -599,6 +603,44 @@
       (if-let true (has_avx512f))
       (let ((kreg Reg (x64_512_vpcmpleq (put_in_xmm x) (put_in_xmm_mem y))))
         (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; I16X32 / I8X64 signed comparisons (AVX-512BW)
+
+;; I16X32 Equal
+(rule 17 (lower (icmp (IntCC.Equal) x @ (value_type (multi_lane 16 32)) y))
+      (if-let true (has_avx512bw))
+      (x64_512_vpcmpeqw (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; I16X32 Not Equal
+(rule 17 (lower (icmp (IntCC.NotEqual) x @ (value_type (multi_lane 16 32)) y))
+      (if-let true (has_avx512bw))
+      (x64_512_vpxord
+        (x64_512_vpcmpeqw (put_in_xmm x) (put_in_xmm_mem y))
+        (x64_512_all_ones_32)))
+
+;; I16X32 Signed Greater Than
+(rule 17 (lower (icmp (IntCC.SignedGreaterThan) x @ (value_type (multi_lane 16 32)) y))
+      (if-let true (has_avx512bw))
+      (x64_512_vpcmpgtw (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; I16X32 Signed Less Than
+(rule 17 (lower (icmp (IntCC.SignedLessThan) x @ (value_type (multi_lane 16 32)) y))
+      (if-let true (has_avx512bw))
+      (x64_512_vpcmpgtw (put_in_xmm y) (put_in_xmm_mem x)))
+
+;; I16X32 Signed Greater Than Or Equal
+(rule 17 (lower (icmp (IntCC.SignedGreaterThanOrEqual) x @ (value_type (multi_lane 16 32)) y))
+      (if-let true (has_avx512bw))
+      (x64_512_vpxord
+        (x64_512_vpcmpgtw (put_in_xmm y) (put_in_xmm_mem x))
+        (x64_512_all_ones_32)))
+
+;; I16X32 Signed Less Than Or Equal
+(rule 17 (lower (icmp (IntCC.SignedLessThanOrEqual) x @ (value_type (multi_lane 16 32)) y))
+      (if-let true (has_avx512bw))
+      (x64_512_vpxord
+        (x64_512_vpcmpgtw (put_in_xmm x) (put_in_xmm_mem y))
+        (x64_512_all_ones_32)))
 
 ;; =============================================================================
 ;; 512-bit Unsigned Integer Comparison (icmp unsigned)
@@ -1065,6 +1107,28 @@
       (x64_512_vpblendmq (x64_512_vec_mask_to_kreg_64 (put_in_xmm cond))
                        (put_in_xmm if_false)
                        (put_in_xmm_mem if_true)))
+
+;; I16X32 bitselect -> VPANDD/VPORD (bitwise)
+(rule 17 (lower (has_type (multi_lane 16 32) (bitselect cond if_true if_false)))
+      (if-let true (has_avx512f))
+      (let ((cond_xmm Xmm (put_in_xmm cond))
+            (true_xmm Xmm (put_in_xmm if_true))
+            (false_xmm Xmm (put_in_xmm if_false))
+            (a Xmm (x64_512_vpandd true_xmm cond_xmm))
+            (cond_inv Xmm (x64_512_vpxord cond_xmm (x64_512_all_ones_32)))
+            (b Xmm (x64_512_vpandd false_xmm cond_inv)))
+        (x64_512_vpord a b)))
+
+;; I8X64 bitselect -> VPANDD/VPORD (bitwise)
+(rule 17 (lower (has_type (multi_lane 8 64) (bitselect cond if_true if_false)))
+      (if-let true (has_avx512f))
+      (let ((cond_xmm Xmm (put_in_xmm cond))
+            (true_xmm Xmm (put_in_xmm if_true))
+            (false_xmm Xmm (put_in_xmm if_false))
+            (a Xmm (x64_512_vpandd true_xmm cond_xmm))
+            (cond_inv Xmm (x64_512_vpxord cond_xmm (x64_512_all_ones_32)))
+            (b Xmm (x64_512_vpandd false_xmm cond_inv)))
+        (x64_512_vpord a b)))
 
 ;; =============================================================================
 ;; 512-bit Count Leading Zeros (VPLZCNTD/Q - AVX-512CD)
