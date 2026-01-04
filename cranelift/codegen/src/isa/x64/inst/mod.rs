@@ -334,6 +334,9 @@ impl Inst {
                     _ if (ty.is_float() || ty.is_vector()) && ty.bits() == 128 => {
                         asm::inst::movdqu_a::new(to_reg, from_addr).into()
                     }
+                    _ if ty.is_vector() && ty.bits() == 256 => {
+                        asm::inst::vmovdqu32_yl::new(to_reg, from_addr).into()
+                    }
                     // AVX-512: 512-bit vector load
                     _ if ty.is_vector() && ty.bits() == 512 => {
                         asm::inst::vmovdqu32_zl::new(to_reg, from_addr).into()
@@ -383,6 +386,9 @@ impl Inst {
                     types::F64X2 => asm::inst::movupd_b::new(to_addr, from_reg).into(),
                     _ if (ty.is_float() || ty.is_vector()) && ty.bits() == 128 => {
                         asm::inst::movdqu_b::new(to_addr, from_reg).into()
+                    }
+                    _ if ty.is_vector() && ty.bits() == 256 => {
+                        asm::inst::vmovdqu32_ys::new(to_addr, from_reg).into()
                     }
                     // AVX-512: 512-bit vector store
                     _ if ty.is_vector() && ty.bits() == 512 => {
@@ -1527,6 +1533,9 @@ impl MachInst for Inst {
                     types::F64X2 => asm::inst::movapd_a::new(dst_reg, src_reg).into(),
                     _ if (ty.is_float() || ty.is_vector()) && ty.bits() <= 128 => {
                         asm::inst::movdqa_a::new(dst_reg, src_reg).into()
+                    }
+                    _ if ty.is_vector() && ty.bits() == 256 => {
+                        asm::inst::vmovdqu32_yl::new(dst_reg, src_reg).into()
                     }
                     _ if ty.is_vector() && ty.bits() == 512 => {
                         asm::inst::vmovdqu32_zl::new(dst_reg, src_reg).into()

@@ -2056,9 +2056,12 @@ impl ScatterOp {
     /// Returns the opcode for this scatter operation.
     pub fn opcode(&self) -> u8 {
         match self {
-            // Scatter uses opcodes 0xA0/0xA1 in 0F38 map
-            ScatterOp::Vpscatterdd | ScatterOp::Vpscatterqd => 0xA0,
-            ScatterOp::Vpscatterdq | ScatterOp::Vpscatterqq => 0xA1,
+            // Opcode depends on index size, NOT element size:
+            // - 0xA0 for 32-bit indices (D): VPSCATTERDD, VPSCATTERDQ
+            // - 0xA1 for 64-bit indices (Q): VPSCATTERQD, VPSCATTERQQ
+            // The W bit (element size) is a separate encoding field.
+            ScatterOp::Vpscatterdd | ScatterOp::Vpscatterdq => 0xA0,
+            ScatterOp::Vpscatterqd | ScatterOp::Vpscatterqq => 0xA1,
         }
     }
 

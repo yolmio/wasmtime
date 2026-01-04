@@ -259,7 +259,7 @@ pub fn pretty_print_reg(reg: Reg, size: u8) -> String {
                 gpr::enc::to_string(enc, size).to_string()
             }
             RegClass::Float => xmm::enc::to_string(enc).to_string(),
-            RegClass::Vector => format!("k{enc}"),
+            RegClass::Vector => format!("%k{enc}"),
         }
     } else {
         let mut name = format!("%{reg:?}");

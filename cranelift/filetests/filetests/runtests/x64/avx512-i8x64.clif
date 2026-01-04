@@ -1,0 +1,433 @@
+test run
+set opt_level=none
+set enable_simd32=true
+target x86_64 has_avx512f has_avx512vl has_avx512bw
+
+function %avx512_i8x64_cmp_mask() -> i64 {
+block0:
+    v0 = vconst.i8x64 [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63]
+    v1 = iconst.i8 32
+    v2 = splat.i8x64 v1
+    v3 = icmp slt v0, v2
+    v4 = vhigh_bits.i64 v3
+    return v4
+}
+; run: %avx512_i8x64_cmp_mask() == 4294967295
+
+function %avx512_i8x64_bitselect() -> i32 {
+    ss0 = explicit_slot 64
+
+block0:
+    v0 = vconst.i8x64 [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63]
+    v1 = vconst.i8x64 [63 62 61 60 59 58 57 56 55 54 53 52 51 50 49 48 47 46 45 44 43 42 41 40 39 38 37 36 35 34 33 32 31 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0]
+    v2 = vconst.i8x64 [-1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0]
+    v3 = bitselect v2, v0, v1
+    stack_store v3, ss0
+    v4 = stack_load.i8 ss0
+    v5 = stack_load.i8 ss0+1
+    v6 = stack_load.i8 ss0+62
+    v7 = stack_load.i8 ss0+63
+    v8 = uextend.i32 v4
+    v9 = uextend.i32 v5
+    v10 = uextend.i32 v6
+    v11 = uextend.i32 v7
+    v12 = iadd v8, v9
+    v13 = iadd v10, v11
+    v14 = iadd v12, v13
+    return v14
+}
+; run: %avx512_i8x64_bitselect() == 124
+
+function %avx512_i8x64_mask_logic() -> i32 {
+    ss0 = explicit_slot 64
+    ss1 = explicit_slot 64
+    ss2 = explicit_slot 64
+    ss3 = explicit_slot 64
+
+block0:
+    v0 = vconst.i8x64 [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63]
+    v1 = vconst.i8x64 [63 62 61 60 59 58 57 56 55 54 53 52 51 50 49 48 47 46 45 44 43 42 41 40 39 38 37 36 35 34 33 32 31 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0]
+    v2 = iconst.i8 32
+    v3 = splat.i8x64 v2
+    v4 = icmp slt v0, v3
+    v5 = bnot v4
+    v6 = bxor v4, v5
+    v7 = band v4, v5
+    v8 = bitselect v4, v0, v1
+    v9 = bitselect v5, v0, v1
+    v10 = bitselect v6, v0, v1
+    v11 = bitselect v7, v0, v1
+    stack_store v8, ss0
+    stack_store v9, ss1
+    stack_store v10, ss2
+    stack_store v11, ss3
+    v12 = stack_load.i8 ss0
+    v13 = stack_load.i8 ss0+31
+    v14 = stack_load.i8 ss0+32
+    v15 = stack_load.i8 ss0+63
+    v16 = stack_load.i8 ss1
+    v17 = stack_load.i8 ss1+31
+    v18 = stack_load.i8 ss1+32
+    v19 = stack_load.i8 ss1+63
+    v20 = stack_load.i8 ss2
+    v21 = stack_load.i8 ss2+31
+    v22 = stack_load.i8 ss2+32
+    v23 = stack_load.i8 ss2+63
+    v24 = stack_load.i8 ss3
+    v25 = stack_load.i8 ss3+31
+    v26 = stack_load.i8 ss3+32
+    v27 = stack_load.i8 ss3+63
+    v28 = uextend.i32 v12
+    v29 = uextend.i32 v13
+    v30 = uextend.i32 v14
+    v31 = uextend.i32 v15
+    v32 = uextend.i32 v16
+    v33 = uextend.i32 v17
+    v34 = uextend.i32 v18
+    v35 = uextend.i32 v19
+    v36 = uextend.i32 v20
+    v37 = uextend.i32 v21
+    v38 = uextend.i32 v22
+    v39 = uextend.i32 v23
+    v40 = uextend.i32 v24
+    v41 = uextend.i32 v25
+    v42 = uextend.i32 v26
+    v43 = uextend.i32 v27
+    v44 = iadd v28, v29
+    v45 = iadd v30, v31
+    v46 = iadd v32, v33
+    v47 = iadd v34, v35
+    v48 = iadd v36, v37
+    v49 = iadd v38, v39
+    v50 = iadd v40, v41
+    v51 = iadd v42, v43
+    v52 = iadd v44, v45
+    v53 = iadd v46, v47
+    v54 = iadd v48, v49
+    v55 = iadd v50, v51
+    v56 = iadd v52, v53
+    v57 = iadd v54, v55
+    v58 = iadd v56, v57
+    return v58
+}
+; run: %avx512_i8x64_mask_logic() == 504
+
+function %avx512_i16x32_mask_logic() -> i32 {
+    ss0 = explicit_slot 64
+    ss1 = explicit_slot 64
+    ss2 = explicit_slot 64
+    ss3 = explicit_slot 64
+
+block0:
+    v0 = vconst.i16x32 [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31]
+    v1 = vconst.i16x32 [31 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0]
+    v2 = vconst.i16x32 [16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16 16]
+    v3 = icmp slt v0, v2
+    v4 = bnot v3
+    v5 = bxor v3, v4
+    v6 = band v3, v4
+    v7 = bitselect v3, v0, v1
+    v8 = bitselect v4, v0, v1
+    v9 = bitselect v5, v0, v1
+    v10 = bitselect v6, v0, v1
+    stack_store v7, ss0
+    stack_store v8, ss1
+    stack_store v9, ss2
+    stack_store v10, ss3
+    v12 = stack_load.i16 ss0
+    v13 = stack_load.i16 ss0+30
+    v14 = stack_load.i16 ss0+32
+    v15 = stack_load.i16 ss0+62
+    v16 = stack_load.i16 ss1
+    v17 = stack_load.i16 ss1+30
+    v18 = stack_load.i16 ss1+32
+    v19 = stack_load.i16 ss1+62
+    v20 = stack_load.i16 ss2
+    v21 = stack_load.i16 ss2+30
+    v22 = stack_load.i16 ss2+32
+    v23 = stack_load.i16 ss2+62
+    v24 = stack_load.i16 ss3
+    v25 = stack_load.i16 ss3+30
+    v26 = stack_load.i16 ss3+32
+    v27 = stack_load.i16 ss3+62
+    v28 = uextend.i32 v12
+    v29 = uextend.i32 v13
+    v30 = uextend.i32 v14
+    v31 = uextend.i32 v15
+    v32 = uextend.i32 v16
+    v33 = uextend.i32 v17
+    v34 = uextend.i32 v18
+    v35 = uextend.i32 v19
+    v36 = uextend.i32 v20
+    v37 = uextend.i32 v21
+    v38 = uextend.i32 v22
+    v39 = uextend.i32 v23
+    v40 = uextend.i32 v24
+    v41 = uextend.i32 v25
+    v42 = uextend.i32 v26
+    v43 = uextend.i32 v27
+    v44 = iadd v28, v29
+    v45 = iadd v30, v31
+    v46 = iadd v32, v33
+    v47 = iadd v34, v35
+    v48 = iadd v36, v37
+    v49 = iadd v38, v39
+    v50 = iadd v40, v41
+    v51 = iadd v42, v43
+    v52 = iadd v44, v45
+    v53 = iadd v46, v47
+    v54 = iadd v48, v49
+    v55 = iadd v50, v51
+    v56 = iadd v52, v53
+    v57 = iadd v54, v55
+    v58 = iadd v56, v57
+    return v58
+}
+; run: %avx512_i16x32_mask_logic() == 248
+
+function %avx512_i8x64_mask_pressure() -> i32 {
+    ss0 = explicit_slot 64
+    ss1 = explicit_slot 64
+    ss2 = explicit_slot 64
+    ss3 = explicit_slot 64
+
+block0:
+    v0 = vconst.i8x64 [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29 30 31 32 33 34 35 36 37 38 39 40 41 42 43 44 45 46 47 48 49 50 51 52 53 54 55 56 57 58 59 60 61 62 63]
+    v1 = vconst.i8x64 [63 62 61 60 59 58 57 56 55 54 53 52 51 50 49 48 47 46 45 44 43 42 41 40 39 38 37 36 35 34 33 32 31 30 29 28 27 26 25 24 23 22 21 20 19 18 17 16 15 14 13 12 11 10 9 8 7 6 5 4 3 2 1 0]
+    v2 = iconst.i8 32
+    v3 = splat.i8x64 v2
+    v4 = icmp slt v0, v3
+    v5 = iconst.i8 16
+    v6 = splat.i8x64 v5
+    v7 = icmp slt v0, v6
+    v8 = bnot v7
+    v9 = bxor v4, v7
+    v10 = band v4, v8
+    v11 = bitselect v4, v0, v1
+    v12 = bitselect v8, v1, v0
+    v13 = bitselect v9, v1, v0
+    v14 = bitselect v10, v0, v1
+    stack_store v11, ss0
+    stack_store v12, ss1
+    stack_store v13, ss2
+    stack_store v14, ss3
+    v15 = stack_load.i8 ss0
+    v16 = stack_load.i8 ss0+15
+    v17 = stack_load.i8 ss0+16
+    v18 = stack_load.i8 ss0+63
+    v19 = stack_load.i8 ss1
+    v20 = stack_load.i8 ss1+15
+    v21 = stack_load.i8 ss1+16
+    v22 = stack_load.i8 ss1+63
+    v23 = stack_load.i8 ss2
+    v24 = stack_load.i8 ss2+15
+    v25 = stack_load.i8 ss2+16
+    v26 = stack_load.i8 ss2+63
+    v27 = stack_load.i8 ss3
+    v28 = stack_load.i8 ss3+15
+    v29 = stack_load.i8 ss3+16
+    v30 = stack_load.i8 ss3+63
+    v31 = uextend.i32 v15
+    v32 = uextend.i32 v16
+    v33 = uextend.i32 v17
+    v34 = uextend.i32 v18
+    v35 = uextend.i32 v19
+    v36 = uextend.i32 v20
+    v37 = uextend.i32 v21
+    v38 = uextend.i32 v22
+    v39 = uextend.i32 v23
+    v40 = uextend.i32 v24
+    v41 = uextend.i32 v25
+    v42 = uextend.i32 v26
+    v43 = uextend.i32 v27
+    v44 = uextend.i32 v28
+    v45 = uextend.i32 v29
+    v46 = uextend.i32 v30
+    v47 = iadd v31, v32
+    v48 = iadd v33, v34
+    v49 = iadd v35, v36
+    v50 = iadd v37, v38
+    v51 = iadd v39, v40
+    v52 = iadd v41, v42
+    v53 = iadd v43, v44
+    v54 = iadd v45, v46
+    v55 = iadd v47, v48
+    v56 = iadd v49, v50
+    v57 = iadd v51, v52
+    v58 = iadd v53, v54
+    v59 = iadd v55, v56
+    v60 = iadd v57, v58
+    v61 = iadd v59, v60
+    return v61
+}
+; run: %avx512_i8x64_mask_pressure() == 345
+
+function %avx512_pressure_i8x64(i32) -> i32 {
+    ss0 = explicit_slot 64
+
+block0(v0: i32):
+    v1 = iadd_imm v0, 1
+    v2 = ireduce.i8 v1
+    v3 = splat.i8x64 v2
+    v4 = iadd_imm v0, 2
+    v5 = ireduce.i8 v4
+    v6 = splat.i8x64 v5
+    v7 = iadd_imm v0, 3
+    v8 = ireduce.i8 v7
+    v9 = splat.i8x64 v8
+    v10 = iadd_imm v0, 4
+    v11 = ireduce.i8 v10
+    v12 = splat.i8x64 v11
+    v13 = iadd_imm v0, 5
+    v14 = ireduce.i8 v13
+    v15 = splat.i8x64 v14
+    v16 = iadd_imm v0, 6
+    v17 = ireduce.i8 v16
+    v18 = splat.i8x64 v17
+    v19 = iadd_imm v0, 7
+    v20 = ireduce.i8 v19
+    v21 = splat.i8x64 v20
+    v22 = iadd_imm v0, 8
+    v23 = ireduce.i8 v22
+    v24 = splat.i8x64 v23
+    v25 = iadd_imm v0, 9
+    v26 = ireduce.i8 v25
+    v27 = splat.i8x64 v26
+    v28 = iadd_imm v0, 10
+    v29 = ireduce.i8 v28
+    v30 = splat.i8x64 v29
+    v31 = iadd_imm v0, 11
+    v32 = ireduce.i8 v31
+    v33 = splat.i8x64 v32
+    v34 = iadd_imm v0, 12
+    v35 = ireduce.i8 v34
+    v36 = splat.i8x64 v35
+    v37 = iadd_imm v0, 13
+    v38 = ireduce.i8 v37
+    v39 = splat.i8x64 v38
+    v40 = iadd_imm v0, 14
+    v41 = ireduce.i8 v40
+    v42 = splat.i8x64 v41
+    v43 = iadd_imm v0, 15
+    v44 = ireduce.i8 v43
+    v45 = splat.i8x64 v44
+    v46 = iadd_imm v0, 16
+    v47 = ireduce.i8 v46
+    v48 = splat.i8x64 v47
+    v49 = iadd_imm v0, 17
+    v50 = ireduce.i8 v49
+    v51 = splat.i8x64 v50
+    v52 = iadd_imm v0, 18
+    v53 = ireduce.i8 v52
+    v54 = splat.i8x64 v53
+    v55 = iadd_imm v0, 19
+    v56 = ireduce.i8 v55
+    v57 = splat.i8x64 v56
+    v58 = iadd_imm v0, 20
+    v59 = ireduce.i8 v58
+    v60 = splat.i8x64 v59
+    v61 = iadd_imm v0, 21
+    v62 = ireduce.i8 v61
+    v63 = splat.i8x64 v62
+    v64 = iadd_imm v0, 22
+    v65 = ireduce.i8 v64
+    v66 = splat.i8x64 v65
+    v67 = iadd_imm v0, 23
+    v68 = ireduce.i8 v67
+    v69 = splat.i8x64 v68
+    v70 = iadd_imm v0, 24
+    v71 = ireduce.i8 v70
+    v72 = splat.i8x64 v71
+    v73 = iadd_imm v0, 25
+    v74 = ireduce.i8 v73
+    v75 = splat.i8x64 v74
+    v76 = iadd_imm v0, 26
+    v77 = ireduce.i8 v76
+    v78 = splat.i8x64 v77
+    v79 = iadd_imm v0, 27
+    v80 = ireduce.i8 v79
+    v81 = splat.i8x64 v80
+    v82 = iadd_imm v0, 28
+    v83 = ireduce.i8 v82
+    v84 = splat.i8x64 v83
+    v85 = iadd_imm v0, 29
+    v86 = ireduce.i8 v85
+    v87 = splat.i8x64 v86
+    v88 = iadd_imm v0, 30
+    v89 = ireduce.i8 v88
+    v90 = splat.i8x64 v89
+    v91 = iadd_imm v0, 31
+    v92 = ireduce.i8 v91
+    v93 = splat.i8x64 v92
+    v94 = iadd_imm v0, 32
+    v95 = ireduce.i8 v94
+    v96 = splat.i8x64 v95
+    v97 = iadd_imm v0, 33
+    v98 = ireduce.i8 v97
+    v99 = splat.i8x64 v98
+    v100 = iadd_imm v0, 34
+    v101 = ireduce.i8 v100
+    v102 = splat.i8x64 v101
+    v103 = iadd_imm v0, 35
+    v104 = ireduce.i8 v103
+    v105 = splat.i8x64 v104
+    v106 = iadd_imm v0, 36
+    v107 = ireduce.i8 v106
+    v108 = splat.i8x64 v107
+    v109 = iadd_imm v0, 37
+    v110 = ireduce.i8 v109
+    v111 = splat.i8x64 v110
+    v112 = iadd_imm v0, 38
+    v113 = ireduce.i8 v112
+    v114 = splat.i8x64 v113
+    v115 = iadd_imm v0, 39
+    v116 = ireduce.i8 v115
+    v117 = splat.i8x64 v116
+    v118 = iadd_imm v0, 40
+    v119 = ireduce.i8 v118
+    v120 = splat.i8x64 v119
+    v121 = iadd v3, v6
+    v122 = iadd v121, v9
+    v123 = iadd v122, v12
+    v124 = iadd v123, v15
+    v125 = iadd v124, v18
+    v126 = iadd v125, v21
+    v127 = iadd v126, v24
+    v128 = iadd v127, v27
+    v129 = iadd v128, v30
+    v130 = iadd v129, v33
+    v131 = iadd v130, v36
+    v132 = iadd v131, v39
+    v133 = iadd v132, v42
+    v134 = iadd v133, v45
+    v135 = iadd v134, v48
+    v136 = iadd v135, v51
+    v137 = iadd v136, v54
+    v138 = iadd v137, v57
+    v139 = iadd v138, v60
+    v140 = iadd v139, v63
+    v141 = iadd v140, v66
+    v142 = iadd v141, v69
+    v143 = iadd v142, v72
+    v144 = iadd v143, v75
+    v145 = iadd v144, v78
+    v146 = iadd v145, v81
+    v147 = iadd v146, v84
+    v148 = iadd v147, v87
+    v149 = iadd v148, v90
+    v150 = iadd v149, v93
+    v151 = iadd v150, v96
+    v152 = iadd v151, v99
+    v153 = iadd v152, v102
+    v154 = iadd v153, v105
+    v155 = iadd v154, v108
+    v156 = iadd v155, v111
+    v157 = iadd v156, v114
+    v158 = iadd v157, v117
+    v159 = iadd v158, v120
+    stack_store v159, ss0
+    v160 = stack_load.i8 ss0
+    v161 = uextend.i32 v160
+    return v161
+}
+; run: %avx512_pressure_i8x64(1) == 92

@@ -256,7 +256,7 @@ impl Formats {
                 .value() // indices vector
                 .imm(&imm.uimm8) // scale factor (1, 2, 4, or 8)
                 .imm(&imm.offset32)
-                .typevar_operand(2) // value type is controlling
+                .typevar_operand(1) // value type is controlling
                 .build(),
 
             // Masked memory ops: used for both load and store
@@ -267,7 +267,7 @@ impl Formats {
                 .value() // passthru (load) or value (store)
                 .value() // base address
                 .imm(&imm.offset32)
-                .typevar_operand(2) // value type is controlling
+                .typevar_operand(1) // value type is controlling
                 .build(),
         }
     }

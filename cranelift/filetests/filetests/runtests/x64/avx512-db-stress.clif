@@ -1,0 +1,414 @@
+test run
+set opt_level=none
+set enable_simd32=true
+target x86_64 has_avx512f has_avx512vl has_avx512bw has_avx512dq
+
+function %db_vec_case_when_i32x16() -> i32 {
+    ss0 = explicit_slot 64
+
+block0:
+    v0 = vconst.i32x16 [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15]
+    v1 = vconst.i32x16 [100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115]
+    v2 = vconst.i32x16 [200 201 202 203 204 205 206 207 208 209 210 211 212 213 214 215]
+    v3 = iconst.i32 8
+    v4 = splat.i32x16 v3
+    v5 = icmp slt v0, v4
+    v6 = iconst.i32 10
+    v7 = splat.i32x16 v6
+    v8 = icmp eq v0, v7
+    v9 = bitselect v8, v2, v0
+    v10 = bitselect v5, v1, v9
+    stack_store v10, ss0
+    v11 = stack_load.i32 ss0
+    v12 = stack_load.i32 ss0+28
+    v13 = stack_load.i32 ss0+32
+    v14 = stack_load.i32 ss0+40
+    v15 = stack_load.i32 ss0+48
+    v16 = stack_load.i32 ss0+60
+    v17 = iadd v11, v12
+    v18 = iadd v13, v14
+    v19 = iadd v15, v16
+    v20 = iadd v17, v18
+    v21 = iadd v20, v19
+    return v21
+}
+; run: %db_vec_case_when_i32x16() == 452
+
+function %db_vec_case_chain_i32x16() -> i32 {
+    ss0 = explicit_slot 64
+
+block0:
+    v0 = vconst.i32x16 [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15]
+    v1 = vconst.i32x16 [100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115]
+    v2 = vconst.i32x16 [200 201 202 203 204 205 206 207 208 209 210 211 212 213 214 215]
+    v3 = vconst.i32x16 [300 301 302 303 304 305 306 307 308 309 310 311 312 313 314 315]
+    v4 = iconst.i32 4
+    v5 = splat.i32x16 v4
+    v6 = icmp slt v0, v5
+    v7 = iconst.i32 7
+    v8 = splat.i32x16 v7
+    v9 = icmp eq v0, v8
+    v10 = iconst.i32 12
+    v11 = splat.i32x16 v10
+    v12 = icmp slt v11, v0
+    v13 = bitselect v12, v3, v0
+    v14 = bitselect v9, v2, v13
+    v15 = bitselect v6, v1, v14
+    stack_store v15, ss0
+    v16 = stack_load.i32 ss0
+    v17 = stack_load.i32 ss0+12
+    v18 = stack_load.i32 ss0+28
+    v19 = stack_load.i32 ss0+48
+    v20 = stack_load.i32 ss0+52
+    v21 = stack_load.i32 ss0+60
+    v22 = iadd v16, v17
+    v23 = iadd v18, v19
+    v24 = iadd v20, v21
+    v25 = iadd v22, v23
+    v26 = iadd v25, v24
+    return v26
+}
+; run: %db_vec_case_chain_i32x16() == 1050
+
+function %db_vec_coalesce_i32x16() -> i32 {
+    ss0 = explicit_slot 64
+
+block0:
+    v0 = vconst.i32x16 [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15]
+    v1 = vconst.i32x16 [10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25]
+    v2 = vconst.i32x16 [100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115]
+    v3 = iconst.i32 8
+    v4 = splat.i32x16 v3
+    v5 = icmp slt v0, v4
+    v6 = bitselect v5, v1, v2
+    stack_store v6, ss0
+    v7 = stack_load.i32 ss0
+    v8 = stack_load.i32 ss0+28
+    v9 = stack_load.i32 ss0+32
+    v10 = stack_load.i32 ss0+60
+    v11 = iadd v7, v8
+    v12 = iadd v9, v10
+    v13 = iadd v11, v12
+    return v13
+}
+; run: %db_vec_coalesce_i32x16() == 250
+
+function %db_vec_null_mask_cmp_i32x16() -> i32 {
+    ss0 = explicit_slot 64
+
+block0:
+    v0 = vconst.i32x16 [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15]
+    v1 = vconst.i32x16 [100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115]
+    v2 = vconst.i32x16 [50 51 52 53 54 55 56 57 58 59 60 61 62 63 64 65]
+    v3 = iconst.i32 8
+    v4 = splat.i32x16 v3
+    v5 = icmp slt v0, v4
+    v6 = iconst.i32 12
+    v7 = splat.i32x16 v6
+    v8 = icmp slt v0, v7
+    v9 = band v5, v8
+    v10 = bitselect v9, v1, v2
+    stack_store v10, ss0
+    v11 = stack_load.i32 ss0
+    v12 = stack_load.i32 ss0+28
+    v13 = stack_load.i32 ss0+32
+    v14 = stack_load.i32 ss0+48
+    v15 = stack_load.i32 ss0+60
+    v16 = iadd v11, v12
+    v17 = iadd v13, v14
+    v18 = iadd v16, v17
+    v19 = iadd v18, v15
+    return v19
+}
+; run: %db_vec_null_mask_cmp_i32x16() == 392
+
+function %db_vec_null_mask_not_i32x16() -> i32 {
+    ss0 = explicit_slot 64
+
+block0:
+    v0 = vconst.i32x16 [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15]
+    v1 = vconst.i32x16 [100 101 102 103 104 105 106 107 108 109 110 111 112 113 114 115]
+    v2 = vconst.i32x16 [200 201 202 203 204 205 206 207 208 209 210 211 212 213 214 215]
+    v3 = iconst.i32 8
+    v4 = splat.i32x16 v3
+    v5 = icmp slt v0, v4
+    v6 = bnot v5
+    v7 = iconst.i32 12
+    v8 = splat.i32x16 v7
+    v9 = icmp slt v0, v8
+    v10 = band v6, v9
+    v11 = bitselect v10, v1, v2
+    stack_store v11, ss0
+    v12 = stack_load.i32 ss0
+    v13 = stack_load.i32 ss0+28
+    v14 = stack_load.i32 ss0+32
+    v15 = stack_load.i32 ss0+44
+    v16 = stack_load.i32 ss0+48
+    v17 = stack_load.i32 ss0+60
+    v18 = iadd v12, v13
+    v19 = iadd v14, v15
+    v20 = iadd v16, v17
+    v21 = iadd v18, v19
+    v22 = iadd v21, v20
+    return v22
+}
+; run: %db_vec_null_mask_not_i32x16() == 1053
+
+function %db_vec_enum_bitmask_i8x16() -> i32 {
+    ss0 = explicit_slot 16
+    ss1 = explicit_slot 16
+
+block0:
+    v0 = vconst.i8x16 [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15]
+    v1 = iconst.i64 8493
+    v2 = iconst.i64 1
+    v3 = iconst.i64 0
+    v4 = extractlane v0, 0
+    v5 = uextend.i64 v4
+    v6 = ishl v2, v5
+    v7 = band v6, v1
+    v8 = icmp ne v7, v3
+    v9 = ineg v8
+    v10 = splat.i8x16 v9
+    v11 = extractlane v0, 1
+    v12 = uextend.i64 v11
+    v13 = ishl v2, v12
+    v14 = band v13, v1
+    v15 = icmp ne v14, v3
+    v16 = ineg v15
+    v17 = insertlane v10, v16, 1
+    v18 = extractlane v0, 2
+    v19 = uextend.i64 v18
+    v20 = ishl v2, v19
+    v21 = band v20, v1
+    v22 = icmp ne v21, v3
+    v23 = ineg v22
+    v24 = insertlane v17, v23, 2
+    v25 = extractlane v0, 3
+    v26 = uextend.i64 v25
+    v27 = ishl v2, v26
+    v28 = band v27, v1
+    v29 = icmp ne v28, v3
+    v30 = ineg v29
+    v31 = insertlane v24, v30, 3
+    v32 = extractlane v0, 4
+    v33 = uextend.i64 v32
+    v34 = ishl v2, v33
+    v35 = band v34, v1
+    v36 = icmp ne v35, v3
+    v37 = ineg v36
+    v38 = insertlane v31, v37, 4
+    v39 = extractlane v0, 5
+    v40 = uextend.i64 v39
+    v41 = ishl v2, v40
+    v42 = band v41, v1
+    v43 = icmp ne v42, v3
+    v44 = ineg v43
+    v45 = insertlane v38, v44, 5
+    v46 = extractlane v0, 6
+    v47 = uextend.i64 v46
+    v48 = ishl v2, v47
+    v49 = band v48, v1
+    v50 = icmp ne v49, v3
+    v51 = ineg v50
+    v52 = insertlane v45, v51, 6
+    v53 = extractlane v0, 7
+    v54 = uextend.i64 v53
+    v55 = ishl v2, v54
+    v56 = band v55, v1
+    v57 = icmp ne v56, v3
+    v58 = ineg v57
+    v59 = insertlane v52, v58, 7
+    v60 = extractlane v0, 8
+    v61 = uextend.i64 v60
+    v62 = ishl v2, v61
+    v63 = band v62, v1
+    v64 = icmp ne v63, v3
+    v65 = ineg v64
+    v66 = insertlane v59, v65, 8
+    v67 = extractlane v0, 9
+    v68 = uextend.i64 v67
+    v69 = ishl v2, v68
+    v70 = band v69, v1
+    v71 = icmp ne v70, v3
+    v72 = ineg v71
+    v73 = insertlane v66, v72, 9
+    v74 = extractlane v0, 10
+    v75 = uextend.i64 v74
+    v76 = ishl v2, v75
+    v77 = band v76, v1
+    v78 = icmp ne v77, v3
+    v79 = ineg v78
+    v80 = insertlane v73, v79, 10
+    v81 = extractlane v0, 11
+    v82 = uextend.i64 v81
+    v83 = ishl v2, v82
+    v84 = band v83, v1
+    v85 = icmp ne v84, v3
+    v86 = ineg v85
+    v87 = insertlane v80, v86, 11
+    v88 = extractlane v0, 12
+    v89 = uextend.i64 v88
+    v90 = ishl v2, v89
+    v91 = band v90, v1
+    v92 = icmp ne v91, v3
+    v93 = ineg v92
+    v94 = insertlane v87, v93, 12
+    v95 = extractlane v0, 13
+    v96 = uextend.i64 v95
+    v97 = ishl v2, v96
+    v98 = band v97, v1
+    v99 = icmp ne v98, v3
+    v100 = ineg v99
+    v101 = insertlane v94, v100, 13
+    v102 = extractlane v0, 14
+    v103 = uextend.i64 v102
+    v104 = ishl v2, v103
+    v105 = band v104, v1
+    v106 = icmp ne v105, v3
+    v107 = ineg v106
+    v108 = insertlane v101, v107, 14
+    v109 = extractlane v0, 15
+    v110 = uextend.i64 v109
+    v111 = ishl v2, v110
+    v112 = band v111, v1
+    v113 = icmp ne v112, v3
+    v114 = ineg v113
+    v115 = insertlane v108, v114, 15
+    v116 = bnot v115
+    v117 = iconst.i8 0
+    v118 = splat.i8x16 v117
+    v119 = bitselect v115, v0, v118
+    v120 = bitselect v116, v0, v118
+    stack_store v119, ss0
+    stack_store v120, ss1
+    v121 = stack_load.i8 ss0
+    v122 = stack_load.i8 ss0+2
+    v123 = stack_load.i8 ss0+3
+    v124 = stack_load.i8 ss0+5
+    v125 = stack_load.i8 ss0+8
+    v126 = stack_load.i8 ss0+13
+    v127 = stack_load.i8 ss1+1
+    v128 = stack_load.i8 ss1+4
+    v129 = stack_load.i8 ss1+6
+    v130 = stack_load.i8 ss1+7
+    v131 = stack_load.i8 ss1+9
+    v132 = stack_load.i8 ss1+15
+    v133 = uextend.i32 v121
+    v134 = uextend.i32 v122
+    v135 = uextend.i32 v123
+    v136 = uextend.i32 v124
+    v137 = uextend.i32 v125
+    v138 = uextend.i32 v126
+    v139 = uextend.i32 v127
+    v140 = uextend.i32 v128
+    v141 = uextend.i32 v129
+    v142 = uextend.i32 v130
+    v143 = uextend.i32 v131
+    v144 = uextend.i32 v132
+    v145 = iadd v133, v134
+    v146 = iadd v135, v136
+    v147 = iadd v137, v138
+    v148 = iadd v139, v140
+    v149 = iadd v141, v142
+    v150 = iadd v143, v144
+    v151 = iadd v145, v146
+    v152 = iadd v147, v148
+    v153 = iadd v149, v150
+    v154 = iadd v151, v152
+    v155 = iadd v154, v153
+    return v155
+}
+; run: %db_vec_enum_bitmask_i8x16() == 73
+
+function %db_vec_bool_null_mask_i8x16() -> i32 {
+    ss0 = explicit_slot 16
+
+block0:
+    v0 = vconst.i8x16 [-1 -1 0 0 -1 -1 0 0 -1 -1 0 0 -1 -1 0 0]
+    v1 = vconst.i8x16 [-1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0]
+    v2 = vconst.i8x16 [0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1 0 -1]
+    v3 = vconst.i8x16 [-1 -1 -1 -1 0 0 0 0 -1 -1 -1 -1 0 0 0 0]
+    v4 = band v0, v1
+    v5 = bnot v0
+    v6 = band v5, v2
+    v7 = bor v4, v6
+    v8 = band v7, v3
+    v9 = vconst.i8x16 [1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1]
+    v10 = band v8, v9
+    stack_store v10, ss0
+    v11 = stack_load.i8 ss0
+    v12 = stack_load.i8 ss0+1
+    v13 = stack_load.i8 ss0+3
+    v14 = stack_load.i8 ss0+4
+    v15 = stack_load.i8 ss0+8
+    v16 = stack_load.i8 ss0+11
+    v17 = uextend.i32 v11
+    v18 = uextend.i32 v12
+    v19 = uextend.i32 v13
+    v20 = uextend.i32 v14
+    v21 = uextend.i32 v15
+    v22 = uextend.i32 v16
+    v23 = iadd v17, v18
+    v24 = iadd v19, v20
+    v25 = iadd v21, v22
+    v26 = iadd v23, v24
+    v27 = iadd v26, v25
+    return v27
+}
+; run: %db_vec_bool_null_mask_i8x16() == 4
+
+function %db_vec_germanstring_eq_i64x8() -> i64 {
+    ss0 = explicit_slot 64
+
+block0:
+    v0 = vconst.i64x8 [42 1 42 3 4 42 6 7]
+    v1 = vconst.i64x8 [1000 1000 5 1000 1000 1000 7 1000]
+    v2 = iconst.i64 42
+    v3 = splat.i64x8 v2
+    v4 = iconst.i64 1000
+    v5 = splat.i64x8 v4
+    v6 = icmp eq v0, v3
+    v7 = icmp eq v1, v5
+    v8 = band v6, v7
+    v9 = vconst.i64x8 [10 11 12 13 14 15 16 17]
+    v10 = iconst.i64 0
+    v11 = splat.i64x8 v10
+    v12 = bitselect v8, v9, v11
+    stack_store v12, ss0
+    v13 = stack_load.i64 ss0
+    v14 = stack_load.i64 ss0+40
+    v15 = iadd v13, v14
+    return v15
+}
+; run: %db_vec_germanstring_eq_i64x8() == 25
+
+function %db_vec_germanstring_eq_masked_i64x8() -> i64 {
+    ss0 = explicit_slot 64
+
+block0:
+    v0 = vconst.i64x8 [42 1 42 3 4 42 6 7]
+    v1 = vconst.i64x8 [1000 1000 5 1000 1000 1000 7 1000]
+    v2 = iconst.i64 42
+    v3 = splat.i64x8 v2
+    v4 = iconst.i64 1000
+    v5 = splat.i64x8 v4
+    v6 = icmp eq v0, v3
+    v7 = icmp eq v1, v5
+    v8 = band v6, v7
+    v9 = vconst.i64x8 [0 1 2 3 4 5 6 7]
+    v10 = iconst.i64 5
+    v11 = splat.i64x8 v10
+    v12 = icmp slt v9, v11
+    v13 = band v8, v12
+    v14 = vconst.i64x8 [10 11 12 13 14 15 16 17]
+    v15 = iconst.i64 0
+    v16 = splat.i64x8 v15
+    v17 = bitselect v13, v14, v16
+    stack_store v17, ss0
+    v18 = stack_load.i64 ss0
+    v19 = stack_load.i64 ss0+40
+    v20 = iadd v18, v19
+    return v20
+}
+; run: %db_vec_germanstring_eq_masked_i64x8() == 10

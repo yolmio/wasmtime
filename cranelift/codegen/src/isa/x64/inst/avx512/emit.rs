@@ -2297,7 +2297,7 @@ pub fn emit_x64_512_fp_special(
                     match amode {
                         Amode::ImmReg { base, simm32, .. } => {
                             let base_enc = base.to_real_reg().unwrap().hw_enc();
-                            evex.emit(dst_enc, 0, base_enc, true, sink);
+                            evex.emit_for_mem(dst_enc, base_enc, None, sink);
                             sink.put1(op.opcode());
                             let modrm = if *simm32 == 0 && (base_enc & 0x07) != 5 {
                                 0x00 | ((dst_enc & 0x07) << 3) | (base_enc & 0x07)
