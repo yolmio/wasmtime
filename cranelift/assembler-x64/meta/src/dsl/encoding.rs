@@ -57,6 +57,7 @@ pub fn evex(length: Length, tuple_type: TupleType) -> Evex {
         modrm: None,
         imm: Imm::None,
         tuple_type,
+        masking: EvexMasking::None,
     }
 }
 
@@ -113,6 +114,16 @@ pub enum ModRmKind {
     /// From the reference manual: "indicates that the ModR/M byte of the
     /// instruction contains a register operand and an r/m operand."
     Reg,
+
+    /// Models `/r` with swapped operand assignment.
+    ///
+    /// Some instructions (like VPMOV* truncation) use Op/En A where:
+    /// - ModRM:r/m (w) = destination (first operand)
+    /// - ModRM:reg (r) = source (second operand)
+    ///
+    /// This is the opposite of the normal `/r` encoding where the first
+    /// operand goes in reg and the second in r/m.
+    RegSwapped,
 }
 
 impl ModRmKind {
@@ -140,6 +151,7 @@ impl fmt::Display for ModRmKind {
         match self {
             ModRmKind::Digit(digit) => write!(f, "/{digit}"),
             ModRmKind::Reg => write!(f, "/r"),
+            ModRmKind::RegSwapped => write!(f, "/r (swapped)"),
         }
     }
 }
@@ -1222,6 +1234,25 @@ impl fmt::Display for Vex {
     }
 }
 
+/// Specifies how AVX-512 masking is applied.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EvexMasking {
+    /// No masking applied (aaa = 0, equivalent to using k0).
+    None,
+    /// Merge-masking: elements not selected by the mask retain their previous
+    /// value in the destination register.
+    Merge,
+    /// Zero-masking: elements not selected by the mask are zeroed in the
+    /// destination register.
+    Zeroing,
+}
+
+impl Default for EvexMasking {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
 pub struct Evex {
     /// The vector length of the operand (e.g., 128-bit, 256-bit, or 512-bit).
     pub length: Length,
@@ -1247,6 +1278,9 @@ pub struct Evex {
     /// The "Tuple Type" corresponding to scaling of the 8-bit displacement
     /// parameter for memory operands. See [`TupleType`] for more information.
     pub tuple_type: TupleType,
+    /// The masking mode for this instruction. When set to `Merge` or `Zeroing`,
+    /// the instruction accepts a mask register operand (k1-k7).
+    pub masking: EvexMasking,
 }
 
 impl Evex {
@@ -1352,6 +1386,21 @@ impl Evex {
         }
     }
 
+    /// Set the ModR/M byte with swapped operand assignment.
+    ///
+    /// Use this for instructions like VPMOV* truncation where Intel specifies:
+    /// - ModRM:r/m = destination (first operand)
+    /// - ModRM:reg = source (second operand)
+    ///
+    /// This is the opposite of the normal `.r()` encoding.
+    pub fn mr(self) -> Self {
+        assert!(self.modrm.is_none());
+        Self {
+            modrm: Some(ModRmKind::RegSwapped),
+            ..self
+        }
+    }
+
     fn validate(&self, _operands: &[Operand]) {
         assert!(self.opcode != u8::MAX);
         assert!(self.mmm.is_some());
@@ -1395,6 +1444,45 @@ impl Evex {
             ..self
         }
     }
+
+    /// Enable merge-masking for this instruction. The instruction will accept
+    /// a mask register operand (k1-k7), and elements not selected by the mask
+    /// will retain their previous values in the destination.
+    #[must_use]
+    pub fn merge_mask(self) -> Self {
+        assert_eq!(self.masking, EvexMasking::None, "masking mode already set");
+        Self {
+            masking: EvexMasking::Merge,
+            ..self
+        }
+    }
+
+    /// Enable zero-masking for this instruction. The instruction will accept
+    /// a mask register operand (k1-k7), and elements not selected by the mask
+    /// will be zeroed in the destination.
+    #[must_use]
+    pub fn zero_mask(self) -> Self {
+        assert_eq!(self.masking, EvexMasking::None, "masking mode already set");
+        Self {
+            masking: EvexMasking::Zeroing,
+            ..self
+        }
+    }
+
+    /// Returns true if this instruction supports masking.
+    pub fn supports_masking(&self) -> bool {
+        self.masking != EvexMasking::None
+    }
+
+    /// Returns true if this instruction uses zero-masking.
+    pub fn uses_zeroing(&self) -> bool {
+        self.masking == EvexMasking::Zeroing
+    }
+
+    /// Returns true if this instruction has swapped reg/rm operand assignment.
+    pub fn is_swapped(&self) -> bool {
+        self.modrm == Some(ModRmKind::RegSwapped)
+    }
 }
 
 impl From<Evex> for Encoding {
@@ -1418,6 +1506,11 @@ impl fmt::Display for Evex {
         }
         if self.imm != Imm::None {
             write!(f, " {}", self.imm)?;
+        }
+        match self.masking {
+            EvexMasking::None => {}
+            EvexMasking::Merge => write!(f, " {{k}}")?,
+            EvexMasking::Zeroing => write!(f, " {{k}}{{z}}")?,
         }
         Ok(())
     }

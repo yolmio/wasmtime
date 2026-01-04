@@ -32,8 +32,13 @@ impl dsl::Operand {
             xmm_m8 | xmm_m16 | xmm_m32 | xmm_m64 | xmm_m128 => {
                 format!("XmmMem<R::{mut_}Xmm, R::ReadGpr>")
             }
-            m8 | m16 | m32 | m64 | m128 => format!("Amode<R::ReadGpr>"),
+            m8 | m16 | m32 | m64 | m128 | m256 | m512 => format!("Amode<R::ReadGpr>"),
             xmm0 => format!("Fixed<R::{mut_}Xmm, {{ xmm::enc::XMM0 }}>"),
+            ymm1 => format!("Xmm<R::{mut_}Xmm>"),
+            ymm_m256 => format!("XmmMem<R::{mut_}Xmm, R::ReadGpr>"),
+            zmm1 | zmm2 | zmm3 => format!("Xmm<R::{mut_}Xmm>"),
+            zmm_m512 => format!("XmmMem<R::{mut_}Xmm, R::ReadGpr>"),
+            k1 | k2 | k3 => format!("Kmask<R::{mut_}Kmask>"),
         }
     }
 }
@@ -65,8 +70,14 @@ impl dsl::Location {
                 }
             }
             xmm1 | xmm2 | xmm3 | xmm_m8 | xmm_m16 | xmm_m32 | xmm_m64 | xmm_m128 | m8 | m16
-            | m32 | m64 | m128 => {
+            | m32 | m64 | m128 | m256 | m512 | k1 | k2 | k3 => {
                 format!("self.{self}.to_string()")
+            }
+            ymm1 | ymm_m256 => {
+                format!("self.{self}.to_ymm_string()")
+            }
+            zmm1 | zmm2 | zmm3 | zmm_m512 => {
+                format!("self.{self}.to_zmm_string()")
             }
         }
     }
@@ -81,10 +92,11 @@ impl dsl::Location {
             ax | dx | r16 | rm16 => Some("Size::Word"),
             eax | edx | r32 | r32a | r32b | rm32 => Some("Size::Doubleword"),
             rax | rbx | rcx | rdx | r64 | r64a | r64b | rm64 => Some("Size::Quadword"),
-            m8 | m16 | m32 | m64 | m128 => {
+            m8 | m16 | m32 | m64 | m128 | m256 | m512 => {
                 panic!("no need to generate a size for memory-only access")
             }
-            xmm1 | xmm2 | xmm3 | xmm_m8 | xmm_m16 | xmm_m32 | xmm_m64 | xmm_m128 | xmm0 => None,
+            xmm1 | xmm2 | xmm3 | xmm_m8 | xmm_m16 | xmm_m32 | xmm_m64 | xmm_m128 | xmm0 | ymm1
+            | ymm_m256 | zmm1 | zmm2 | zmm3 | zmm_m512 | k1 | k2 | k3 => None,
         }
     }
 }

@@ -128,6 +128,7 @@ pub fn get_isle_compilations(
                     prelude_lower_isle.clone(),
                     src_isa_x64.join("inst.isle"),
                     src_isa_x64.join("lower.isle"),
+                    src_isa_x64.join("lower").join("isle").join("avx512.isle"),
                 ],
                 untracked_inputs: vec![
                     numerics_isle.clone(),

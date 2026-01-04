@@ -727,6 +727,17 @@ macro_rules! isle_common_prelude_methods {
         }
 
         #[inline]
+        fn unpack_value_array_4(&mut self, arr: &ValueArray4) -> (Value, Value, Value, Value) {
+            let [a, b, c, d] = *arr;
+            (a, b, c, d)
+        }
+
+        #[inline]
+        fn pack_value_array_4(&mut self, a: Value, b: Value, c: Value, d: Value) -> ValueArray4 {
+            [a, b, c, d]
+        }
+
+        #[inline]
         fn unpack_block_array_2(&mut self, arr: &BlockArray2) -> (BlockCall, BlockCall) {
             let [a, b] = *arr;
             (a, b)

@@ -43,6 +43,14 @@ pub(crate) struct Formats {
     pub(crate) unary_ieee64: Rc<InstructionFormat>,
     pub(crate) unary_imm: Rc<InstructionFormat>,
     pub(crate) exception_handler_address: Rc<InstructionFormat>,
+
+    // AVX-512 SIMD memory operations
+    /// Gather: memflags, base, indices, offset -> result
+    pub(crate) simd_gather: Rc<InstructionFormat>,
+    /// Scatter: memflags, mask, value, base, indices, offset
+    pub(crate) simd_scatter: Rc<InstructionFormat>,
+    /// Masked memory: memflags, mask, value/passthru, base, offset (used for both load and store)
+    pub(crate) simd_masked_mem: Rc<InstructionFormat>,
 }
 
 impl Formats {
@@ -224,6 +232,42 @@ impl Formats {
             exception_handler_address: Builder::new("ExceptionHandlerAddress")
                 .raw_block()
                 .imm(&imm.imm64)
+                .build(),
+
+            // AVX-512 SIMD memory operations
+            // Gather: load elements from base + indices * scale
+            // Format: memflags, base (addr), indices (vector), scale (1/2/4/8), offset
+            simd_gather: Builder::new("SimdGather")
+                .imm(&imm.memflags)
+                .value() // base address
+                .value() // indices vector
+                .imm(&imm.uimm8) // scale factor (1, 2, 4, or 8)
+                .imm(&imm.offset32)
+                .typevar_operand(1) // indices type determines result type
+                .build(),
+
+            // Scatter: store elements to base + indices * scale
+            // Format: memflags, mask, value, base, indices, scale, offset
+            simd_scatter: Builder::new("SimdScatter")
+                .imm(&imm.memflags)
+                .value() // mask
+                .value() // value to scatter
+                .value() // base address
+                .value() // indices vector
+                .imm(&imm.uimm8) // scale factor (1, 2, 4, or 8)
+                .imm(&imm.offset32)
+                .typevar_operand(2) // value type is controlling
+                .build(),
+
+            // Masked memory ops: used for both load and store
+            // Format: memflags, mask, value (passthru for load, data for store), base, offset
+            simd_masked_mem: Builder::new("SimdMaskedMem")
+                .imm(&imm.memflags)
+                .value() // mask
+                .value() // passthru (load) or value (store)
+                .value() // base address
+                .imm(&imm.offset32)
+                .typevar_operand(2) // value type is controlling
                 .build(),
         }
     }

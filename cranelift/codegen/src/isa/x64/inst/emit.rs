@@ -1822,6 +1822,56 @@ pub(crate) fn emit(
             // Nothing.
         }
 
+        // AVX-512 instructions that require manual implementation
+        // (VSIB addressing for gather/scatter, dual k-register output for vp2intersect,
+        // k-register spill/fill for regalloc)
+        Inst::Avx512KmovKK { dst, src } => {
+            avx512::emit::emit_kmov_kk(*dst, *src, sink);
+        }
+
+        Inst::Avx512KmovLoad { dst, addr } => {
+            let addr = addr.finalize(state.frame_layout(), sink);
+            avx512::emit::emit_kmov_load(*dst, &addr, sink);
+        }
+
+        Inst::Avx512KmovStore { src, addr } => {
+            let addr = addr.finalize(state.frame_layout(), sink);
+            avx512::emit::emit_kmov_store(*src, &addr, sink);
+        }
+
+        Inst::Avx512Gather {
+            op,
+            dst,
+            base,
+            index,
+            scale,
+            disp,
+            mask,
+        } => {
+            avx512::emit::emit_gather(*op, *dst, *base, *index, *scale, *disp, *mask, sink);
+        }
+
+        Inst::Avx512Scatter {
+            op,
+            src,
+            base,
+            index,
+            scale,
+            disp,
+            mask,
+        } => {
+            avx512::emit::emit_scatter(*op, *src, *base, *index, *scale, *disp, *mask, sink);
+        }
+
+        Inst::Avx512Vp2Intersect {
+            op,
+            dst_k,
+            src1,
+            src2,
+        } => {
+            avx512::emit::emit_x64_512_vp2intersect_inst(*op, *dst_k, *src1, src2, sink);
+        }
+
         Inst::External { inst } => {
             let frame = state.frame_layout();
             emit_maybe_shrink(

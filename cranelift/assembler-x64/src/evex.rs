@@ -26,6 +26,18 @@ fn invert_top_bit(enc: u8) -> u8 {
 
 impl EvexPrefix {
     /// Construct the [`EvexPrefix`] for an instruction.
+    ///
+    /// # Parameters
+    /// - `reg`: The ModR/M reg field encoding (0-31)
+    /// - `vvvv`: The EVEX.vvvv field (source register, 0-31)
+    /// - `(b, x)`: The base and index register encodings for memory operands
+    /// - `ll`: Vector length (0=128, 1=256, 2=512)
+    /// - `pp`: SIMD prefix (0=none, 1=66, 2=F3, 3=F2)
+    /// - `mmm`: Escape bytes (1=0F, 2=0F38, 3=0F3A)
+    /// - `w`: The W bit (operand size)
+    /// - `broadcast`: Whether broadcast is enabled
+    /// - `aaa`: Mask register encoding (0=k0/no mask, 1-7=k1-k7)
+    /// - `z`: Zeroing bit (false=merge, true=zero)
     pub fn new(
         reg: u8,
         vvvv: u8,
@@ -35,6 +47,8 @@ impl EvexPrefix {
         mmm: u8,
         w: bool,
         broadcast: bool,
+        aaa: u8,
+        z: bool,
     ) -> Self {
         let r = invert_top_bit(reg);
         let r_prime = invert_top_bit(reg >> 1);
@@ -54,9 +68,8 @@ impl EvexPrefix {
 
         // byte3
         debug_assert!(ll < 0b11, "bits 11b are reserved (#UD); must fit in 2 bits");
-        let aaa = 0b000; // Force k0 masking register for now; eventually this should be configurable (TODO).
-        let z = 0; // Masking kind bit; not used yet (TODO) so we default to merge-masking.
-        let byte3 = z | ll << 5 | (broadcast as u8) << 4 | v_prime << 3 | aaa;
+        debug_assert!(aaa <= 0b111, "mask register must be k0-k7");
+        let byte3 = (z as u8) << 7 | ll << 5 | (broadcast as u8) << 4 | v_prime << 3 | aaa;
 
         Self {
             byte1,
@@ -65,7 +78,7 @@ impl EvexPrefix {
         }
     }
 
-    /// Construct the [`EvexPrefix`] for an instruction.
+    /// Construct the [`EvexPrefix`] for a two-operand instruction (no masking).
     pub fn two_op(
         reg: u8,
         (b, x): (Option<u8>, Option<u8>),
@@ -75,10 +88,25 @@ impl EvexPrefix {
         w: bool,
         broadcast: bool,
     ) -> Self {
-        EvexPrefix::new(reg, 0, (b, x), ll, pp, mmm, w, broadcast)
+        EvexPrefix::new(reg, 0, (b, x), ll, pp, mmm, w, broadcast, 0, false)
     }
 
-    /// Construct the [`EvexPrefix`] for an instruction.
+    /// Construct the [`EvexPrefix`] for a two-operand instruction with masking.
+    pub fn two_op_masked(
+        reg: u8,
+        (b, x): (Option<u8>, Option<u8>),
+        ll: u8,
+        pp: u8,
+        mmm: u8,
+        w: bool,
+        broadcast: bool,
+        aaa: u8,
+        z: bool,
+    ) -> Self {
+        EvexPrefix::new(reg, 0, (b, x), ll, pp, mmm, w, broadcast, aaa, z)
+    }
+
+    /// Construct the [`EvexPrefix`] for a three-operand instruction (no masking).
     pub fn three_op(
         reg: u8,
         vvvv: u8,
@@ -89,7 +117,23 @@ impl EvexPrefix {
         w: bool,
         broadcast: bool,
     ) -> Self {
-        EvexPrefix::new(reg, vvvv, (b, x), ll, pp, mmm, w, broadcast)
+        EvexPrefix::new(reg, vvvv, (b, x), ll, pp, mmm, w, broadcast, 0, false)
+    }
+
+    /// Construct the [`EvexPrefix`] for a three-operand instruction with masking.
+    pub fn three_op_masked(
+        reg: u8,
+        vvvv: u8,
+        (b, x): (Option<u8>, Option<u8>),
+        ll: u8,
+        pp: u8,
+        mmm: u8,
+        w: bool,
+        broadcast: bool,
+        aaa: u8,
+        z: bool,
+    ) -> Self {
+        EvexPrefix::new(reg, vvvv, (b, x), ll, pp, mmm, w, broadcast, aaa, z)
     }
 
     pub(crate) fn encode(&self, sink: &mut impl CodeSink) {

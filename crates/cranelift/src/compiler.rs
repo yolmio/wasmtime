@@ -38,7 +38,7 @@ use wasmtime_environ::{
     DefinedFuncIndex, FlagValue, FrameInstPos, FrameStackShape, FrameStateSlotBuilder,
     FrameTableBuilder, FuncKey, FunctionBodyData, FunctionLoc, HostCall, InliningCompiler,
     ModuleTranslation, ModuleTypesBuilder, PtrSize, StackMapSection, StaticModuleIndex,
-    TrapEncodingBuilder, TrapSentinel, TripleExt, Tunables, WasmFuncType, WasmValType, prelude::*,
+    TrapEncodingBuilder, TrapSentinel, TripleExt, Tunables, WasmFuncType, WasmValType,
 };
 use wasmtime_unwinder::ExceptionTableBuilder;
 
@@ -843,7 +843,11 @@ impl wasmtime_environ::Compiler for Compiler {
 }
 
 impl InliningCompiler for Compiler {
-    fn calls(&self, func_body: &CompiledFunctionBody, calls: &mut IndexSet<FuncKey>) -> Result<()> {
+    fn calls(
+        &self,
+        func_body: &CompiledFunctionBody,
+        calls: &mut wasmtime_environ::prelude::IndexSet<FuncKey>,
+    ) -> Result<()> {
         debug_assert!(!func_body.code.is::<CompiledFunction>());
         debug_assert!(func_body.code.is::<Option<CompilerContext>>());
         let cx = func_body
@@ -1603,7 +1607,7 @@ fn clif_to_env_exception_tables<'a>(
     builder: &mut ExceptionTableBuilder,
     range: Range<u64>,
     call_sites: impl Iterator<Item = FinalizedMachCallSite<'a>>,
-) -> Result<()> {
+) -> wasmtime_environ::error::Result<()> {
     builder.add_func(CodeOffset::try_from(range.start).unwrap(), call_sites)
 }
 
@@ -1615,7 +1619,7 @@ fn clif_to_env_frame_tables<'a>(
     tag_sites: impl Iterator<Item = MachBufferDebugTagList<'a>>,
     frame_layout: &MachBufferFrameLayout,
     frame_descriptors: &HashMap<FuncKey, Vec<u8>>,
-) -> Result<()> {
+) -> wasmtime_environ::error::Result<()> {
     let mut frame_descriptor_indices = HashMap::new();
     for tag_site in tag_sites {
         // Split into frames; each has three debug tags.
@@ -1671,7 +1675,7 @@ fn clif_to_env_breakpoints(
     range: Range<u64>,
     breakpoint_patches: impl Iterator<Item = (u32, Range<u32>)>,
     patch_table: &mut Vec<(u32, Range<u32>)>,
-) -> Result<()> {
+) -> wasmtime_environ::error::Result<()> {
     patch_table.extend(breakpoint_patches.map(|(wasm_pc, offset_range)| {
         let start = offset_range.start + u32::try_from(range.start).unwrap();
         let end = offset_range.end + u32::try_from(range.start).unwrap();

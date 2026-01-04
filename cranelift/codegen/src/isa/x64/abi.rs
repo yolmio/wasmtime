@@ -9,7 +9,6 @@ use crate::isa::{CallConv, unwind::UnwindInst, x64::inst::*, x64::settings as x6
 use crate::machinst::abi::*;
 use crate::machinst::*;
 use crate::settings;
-use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use args::*;
@@ -733,7 +732,8 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             let ty = match r_reg.class() {
                 RegClass::Int => types::I64,
                 RegClass::Float => types::I8X16,
-                RegClass::Vector => unreachable!(),
+                // K-registers are 64-bit
+                RegClass::Vector => types::I64,
             };
 
             // Align to 8 or 16 bytes as required by the storage type of the clobber.
@@ -777,7 +777,8 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             let ty = match rreg.class() {
                 RegClass::Int => types::I64,
                 RegClass::Float => types::I8X16,
-                RegClass::Vector => unreachable!(),
+                // K-registers are 64-bit
+                RegClass::Vector => types::I64,
             };
 
             // Align to 8 or 16 bytes as required by the storage type of the clobber.
@@ -868,17 +869,58 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         match rc {
             RegClass::Int => 1,
             RegClass::Float => vector_scale / 8,
-            RegClass::Vector => unreachable!(),
+            // K-registers are 64-bit, so 1 slot
+            RegClass::Vector => 1,
+        }
+    }
+
+    fn canonical_spill_type(rc: RegClass, isa_flags: &Self::F) -> Type {
+        match rc {
+            RegClass::Float => {
+                // For AVX-512, use 512-bit type to preserve entire ZMM register.
+                // Otherwise, use 128-bit type for XMM registers.
+                if isa_flags.has_avx512f() {
+                    types::I32X16
+                } else {
+                    types::I8X16
+                }
+            }
+            RegClass::Int => types::I64,
+            RegClass::Vector => types::I64,
+        }
+    }
+
+    fn default_vector_bytes(isa_flags: &Self::F) -> u32 {
+        // For AVX-512, ZMM registers are 64 bytes (512 bits)
+        // For AVX/SSE, XMM registers are 16 bytes (128 bits)
+        if isa_flags.has_avx512f() {
+            64
+        } else {
+            16
         }
     }
 
     fn get_machine_env(flags: &settings::Flags, _call_conv: isa::CallConv) -> &MachineEnv {
-        if flags.enable_pinned_reg() {
-            static MACHINE_ENV: MachineEnv = create_reg_env_systemv(true);
-            &MACHINE_ENV
-        } else {
-            static MACHINE_ENV: MachineEnv = create_reg_env_systemv(false);
-            &MACHINE_ENV
+        // We have 4 possible machine environments based on flag combinations:
+        // - enable_pinned_reg: excludes r15 from allocation
+        // - enable_simd32: includes xmm16-31 (AVX-512 extended registers)
+        match (flags.enable_pinned_reg(), flags.enable_simd32()) {
+            (true, true) => {
+                static ENV: MachineEnv = create_reg_env_systemv(true, true);
+                &ENV
+            }
+            (true, false) => {
+                static ENV: MachineEnv = create_reg_env_systemv(true, false);
+                &ENV
+            }
+            (false, true) => {
+                static ENV: MachineEnv = create_reg_env_systemv(false, true);
+                &ENV
+            }
+            (false, false) => {
+                static ENV: MachineEnv = create_reg_env_systemv(false, false);
+                &ENV
+            }
         }
     }
 
@@ -1142,7 +1184,8 @@ fn is_callee_save_systemv(r: RealReg, enable_pinned_reg: bool) -> bool {
             _ => false,
         },
         RegClass::Float => false,
-        RegClass::Vector => unreachable!(),
+        // AVX-512 K-registers (k0-k7) are volatile in System V ABI
+        RegClass::Vector => false,
     }
 }
 
@@ -1161,7 +1204,8 @@ fn is_callee_save_fastcall(r: RealReg, enable_pinned_reg: bool) -> bool {
             XMM6 | XMM7 | XMM8 | XMM9 | XMM10 | XMM11 | XMM12 | XMM13 | XMM14 | XMM15 => true,
             _ => false,
         },
-        RegClass::Vector => unreachable!(),
+        // AVX-512 K-registers (k0-k7) are volatile in Windows Fastcall
+        RegClass::Vector => false,
     }
 }
 
@@ -1176,7 +1220,10 @@ fn compute_clobber_size(clobbers: &[Writable<RealReg>]) -> u32 {
                 clobbered_size = align_to(clobbered_size, 16);
                 clobbered_size += 16;
             }
-            RegClass::Vector => unreachable!(),
+            // AVX-512 K-registers are 64-bit
+            RegClass::Vector => {
+                clobbered_size += 8;
+            }
         }
     }
     align_to(clobbered_size, 16)
@@ -1205,6 +1252,12 @@ const fn windows_clobbers() -> PRegSet {
         .with(regs::fpr_preg(XMM3))
         .with(regs::fpr_preg(XMM4))
         .with(regs::fpr_preg(XMM5))
+        .with(regs::k_preg(2))
+        .with(regs::k_preg(3))
+        .with(regs::k_preg(4))
+        .with(regs::k_preg(5))
+        .with(regs::k_preg(6))
+        .with(regs::k_preg(7))
 }
 
 const fn sysv_clobbers() -> PRegSet {
@@ -1237,6 +1290,12 @@ const fn sysv_clobbers() -> PRegSet {
         .with(regs::fpr_preg(XMM13))
         .with(regs::fpr_preg(XMM14))
         .with(regs::fpr_preg(XMM15))
+        .with(regs::k_preg(2))
+        .with(regs::k_preg(3))
+        .with(regs::k_preg(4))
+        .with(regs::k_preg(5))
+        .with(regs::k_preg(6))
+        .with(regs::k_preg(7))
 }
 
 /// For calling conventions that clobber all registers.
@@ -1275,12 +1334,62 @@ const fn all_clobbers() -> PRegSet {
         .with(regs::fpr_preg(XMM13))
         .with(regs::fpr_preg(XMM14))
         .with(regs::fpr_preg(XMM15))
+        .with(regs::k_preg(2))
+        .with(regs::k_preg(3))
+        .with(regs::k_preg(4))
+        .with(regs::k_preg(5))
+        .with(regs::k_preg(6))
+        .with(regs::k_preg(7))
 }
 
-const fn create_reg_env_systemv(enable_pinned_reg: bool) -> MachineEnv {
+const fn create_reg_env_systemv(enable_pinned_reg: bool, enable_simd32: bool) -> MachineEnv {
     const fn preg(r: Reg) -> PReg {
         r.to_real_reg().unwrap().preg()
     }
+
+    // Non-preferred XMMs: xmm8-15 always, plus xmm16-31 with AVX-512.
+    let mut non_preferred_xmms = PRegSet::empty()
+        .with(preg(regs::xmm8()))
+        .with(preg(regs::xmm9()))
+        .with(preg(regs::xmm10()))
+        .with(preg(regs::xmm11()))
+        .with(preg(regs::xmm12()))
+        .with(preg(regs::xmm13()))
+        .with(preg(regs::xmm14()))
+        .with(preg(regs::xmm15()));
+
+    if enable_simd32 {
+        non_preferred_xmms = non_preferred_xmms
+            .with(preg(regs::xmm16()))
+            .with(preg(regs::xmm17()))
+            .with(preg(regs::xmm18()))
+            .with(preg(regs::xmm19()))
+            .with(preg(regs::xmm20()))
+            .with(preg(regs::xmm21()))
+            .with(preg(regs::xmm22()))
+            .with(preg(regs::xmm23()))
+            .with(preg(regs::xmm24()))
+            .with(preg(regs::xmm25()))
+            .with(preg(regs::xmm26()))
+            .with(preg(regs::xmm27()))
+            .with(preg(regs::xmm28()))
+            .with(preg(regs::xmm29()))
+            .with(preg(regs::xmm30()))
+            .with(preg(regs::xmm31()));
+    }
+
+    // K-mask registers for AVX-512: k1 is reserved, allocate k2-k7.
+    let kmask_preferred = if enable_simd32 {
+        PRegSet::empty()
+            .with(preg(regs::k2()))
+            .with(preg(regs::k3()))
+            .with(preg(regs::k4()))
+            .with(preg(regs::k5()))
+            .with(preg(regs::k6()))
+            .with(preg(regs::k7()))
+    } else {
+        PRegSet::empty()
+    };
 
     let mut env = MachineEnv {
         preferred_regs_by_class: [
@@ -1306,8 +1415,8 @@ const fn create_reg_env_systemv(enable_pinned_reg: bool) -> MachineEnv {
                 .with(preg(regs::xmm5()))
                 .with(preg(regs::xmm6()))
                 .with(preg(regs::xmm7())),
-            // The Vector Regclass is unused
-            PRegSet::empty(),
+            // K-mask registers (Vector regclass) for AVX-512.
+            kmask_preferred,
         ],
         non_preferred_regs_by_class: [
             // Non-preferred GPRs: callee-saved in the SysV ABI.
@@ -1316,18 +1425,9 @@ const fn create_reg_env_systemv(enable_pinned_reg: bool) -> MachineEnv {
                 .with(preg(regs::r12()))
                 .with(preg(regs::r13()))
                 .with(preg(regs::r14())),
-            // Non-preferred XMMs: the last 8 registers, which can have larger
-            // encodings with AVX instructions.
-            PRegSet::empty()
-                .with(preg(regs::xmm8()))
-                .with(preg(regs::xmm9()))
-                .with(preg(regs::xmm10()))
-                .with(preg(regs::xmm11()))
-                .with(preg(regs::xmm12()))
-                .with(preg(regs::xmm13()))
-                .with(preg(regs::xmm14()))
-                .with(preg(regs::xmm15())),
-            // The Vector Regclass is unused
+            // Non-preferred XMMs: xmm8-15 (and xmm16-31 with AVX-512).
+            non_preferred_xmms,
+            // No non-preferred k-registers.
             PRegSet::empty(),
         ],
         fixed_stack_slots: vec![],

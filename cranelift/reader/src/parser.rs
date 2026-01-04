@@ -3418,6 +3418,61 @@ impl<'a> Parser<'a> {
                 let imm = self.match_imm64("expected immediate handler index")?;
                 InstructionData::ExceptionHandlerAddress { opcode, block, imm }
             }
+            // AVX-512 instruction formats
+            InstructionFormat::SimdGather => {
+                // Format: memflags, base, indices, scale, offset
+                let flags = self.optional_memflags()?;
+                let base = self.match_value("expected base address")?;
+                self.match_token(Token::Comma, "expected ',' between operands")?;
+                let indices = self.match_value("expected indices vector")?;
+                self.match_token(Token::Comma, "expected ',' between operands")?;
+                let scale = self.match_uimm8("expected scale factor (1, 2, 4, or 8)")?;
+                let offset = self.optional_offset32()?;
+                InstructionData::SimdGather {
+                    opcode,
+                    flags,
+                    args: [base, indices],
+                    imm: scale,
+                    offset,
+                }
+            }
+            InstructionFormat::SimdScatter => {
+                // Format: memflags, mask, value, base, indices, scale, offset
+                let flags = self.optional_memflags()?;
+                let mask = self.match_value("expected mask vector")?;
+                self.match_token(Token::Comma, "expected ',' between operands")?;
+                let value = self.match_value("expected value vector")?;
+                self.match_token(Token::Comma, "expected ',' between operands")?;
+                let base = self.match_value("expected base address")?;
+                self.match_token(Token::Comma, "expected ',' between operands")?;
+                let indices = self.match_value("expected indices vector")?;
+                self.match_token(Token::Comma, "expected ',' between operands")?;
+                let scale = self.match_uimm8("expected scale factor (1, 2, 4, or 8)")?;
+                let offset = self.optional_offset32()?;
+                InstructionData::SimdScatter {
+                    opcode,
+                    flags,
+                    args: [mask, value, base, indices],
+                    imm: scale,
+                    offset,
+                }
+            }
+            InstructionFormat::SimdMaskedMem => {
+                // Format: memflags, mask, passthru/value, base, offset
+                let flags = self.optional_memflags()?;
+                let mask = self.match_value("expected mask vector")?;
+                self.match_token(Token::Comma, "expected ',' between operands")?;
+                let passthru_or_value = self.match_value("expected passthru/value vector")?;
+                self.match_token(Token::Comma, "expected ',' between operands")?;
+                let base = self.match_value("expected base address")?;
+                let offset = self.optional_offset32()?;
+                InstructionData::SimdMaskedMem {
+                    opcode,
+                    flags,
+                    args: [mask, passthru_or_value, base],
+                    offset,
+                }
+            }
         };
         Ok(idata)
     }

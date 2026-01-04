@@ -17,6 +17,7 @@ pub type Unit = ();
 pub type ValueSlice = (ValueList, usize);
 pub type ValueArray2 = [Value; 2];
 pub type ValueArray3 = [Value; 3];
+pub type ValueArray4 = [Value; 4];
 pub type BlockArray2 = [BlockCall; 2];
 pub type WritableReg = Writable<Reg>;
 pub type VecRetPair = Vec<RetPair>;

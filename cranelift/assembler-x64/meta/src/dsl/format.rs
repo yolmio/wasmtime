@@ -281,6 +281,54 @@ impl From<Location> for Operand {
 pub enum RegClass {
     Gpr,
     Xmm,
+    /// 256-bit vector registers (YMM0-YMM31)
+    Ymm,
+    /// 512-bit vector registers (ZMM0-ZMM31)
+    Zmm,
+    /// Mask registers (k0-k7)
+    Kmask,
+}
+
+impl RegClass {
+    /// Returns the visitor method suffix for this register class.
+    ///
+    /// This maps the register class to the suffix used in RegisterVisitor
+    /// method names (e.g., "gpr" for `read_gpr`, "xmm" for `write_xmm`).
+    /// YMM and ZMM registers use the XMM visitor methods since they're the same
+    /// physical registers, just at different widths.
+    pub fn visitor_suffix(&self) -> &'static str {
+        match self {
+            RegClass::Gpr => "gpr",
+            RegClass::Xmm | RegClass::Ymm | RegClass::Zmm => "xmm",
+            RegClass::Kmask => "kmask",
+        }
+    }
+
+    /// Returns the type name for register-memory enum types.
+    ///
+    /// This maps the register class to the enum type used for reg/mem
+    /// operands (e.g., "Gpr" -> "GprMem", "Xmm" -> "XmmMem").
+    /// YMM and ZMM registers use XmmMem since they share the same underlying type.
+    pub fn mem_type_name(&self) -> &'static str {
+        match self {
+            RegClass::Gpr => "Gpr",
+            RegClass::Xmm | RegClass::Ymm | RegClass::Zmm => "Xmm",
+            RegClass::Kmask => "Kmask",
+        }
+    }
+
+    /// Returns the ISLE type name for this register class.
+    ///
+    /// This maps the register class to the ISLE type used in the instruction
+    /// selector (e.g., "Gpr", "Xmm"). YMM and ZMM registers use the Xmm type since
+    /// they share the same register allocation class.
+    pub fn isle_type_name(&self) -> &'static str {
+        match self {
+            RegClass::Gpr => "Gpr",
+            RegClass::Xmm | RegClass::Ymm | RegClass::Zmm => "Xmm",
+            RegClass::Kmask => "Kmask",
+        }
+    }
 }
 
 impl core::fmt::Display for RegClass {
@@ -288,6 +336,9 @@ impl core::fmt::Display for RegClass {
         match self {
             RegClass::Gpr => write!(f, "Gpr"),
             RegClass::Xmm => write!(f, "Xmm"),
+            RegClass::Ymm => write!(f, "Ymm"),
+            RegClass::Zmm => write!(f, "Zmm"),
+            RegClass::Kmask => write!(f, "Kmask"),
         }
     }
 }
@@ -345,6 +396,23 @@ pub enum Location {
     m32,
     m64,
     m128,
+    m256,
+    m512,
+
+    // YMM registers (256-bit), and their memory forms.
+    ymm1,
+    ymm_m256,
+
+    // ZMM registers (512-bit), and their memory forms.
+    zmm1,
+    zmm2,
+    zmm3,
+    zmm_m512,
+
+    // K-mask registers.
+    k1,
+    k2,
+    k3,
 }
 
 impl Location {
@@ -356,8 +424,11 @@ impl Location {
             al | cl | imm8 | r8 | rm8 | m8 | xmm_m8 => 8,
             ax | dx | imm16 | r16 | rm16 | m16 | xmm_m16 => 16,
             eax | edx | imm32 | r32 | r32a | r32b | rm32 | m32 | xmm_m32 => 32,
-            rax | rbx | rcx | rdx | imm64 | r64 | r64a | r64b | rm64 | m64 | xmm_m64 => 64,
+            rax | rbx | rcx | rdx | imm64 | r64 | r64a | r64b | rm64 | m64 | xmm_m64 | k1 | k2
+            | k3 => 64,
             xmm1 | xmm2 | xmm3 | xmm_m128 | xmm0 | m128 => 128,
+            ymm1 | ymm_m256 | m256 => 256,
+            zmm1 | zmm2 | zmm3 | zmm_m512 | m512 => 512,
         }
     }
 
@@ -397,13 +468,11 @@ impl Location {
                 OperandKind::FixedReg(*self)
             }
             imm8 | imm16 | imm32 | imm64 => OperandKind::Imm(*self),
-            r8 | r16 | r32 | r32a | r32b | r64 | r64a | r64b | xmm1 | xmm2 | xmm3 => {
-                OperandKind::Reg(*self)
-            }
-            rm8 | rm16 | rm32 | rm64 | xmm_m8 | xmm_m16 | xmm_m32 | xmm_m64 | xmm_m128 => {
-                OperandKind::RegMem(*self)
-            }
-            m8 | m16 | m32 | m64 | m128 => OperandKind::Mem(*self),
+            r8 | r16 | r32 | r32a | r32b | r64 | r64a | r64b | xmm1 | xmm2 | xmm3 | ymm1 | zmm1
+            | zmm2 | zmm3 | k1 | k2 | k3 => OperandKind::Reg(*self),
+            rm8 | rm16 | rm32 | rm64 | xmm_m8 | xmm_m16 | xmm_m32 | xmm_m64 | xmm_m128
+            | ymm_m256 | zmm_m512 => OperandKind::RegMem(*self),
+            m8 | m16 | m32 | m64 | m128 | m256 | m512 => OperandKind::Mem(*self),
         }
     }
 
@@ -415,12 +484,15 @@ impl Location {
     pub fn reg_class(&self) -> Option<RegClass> {
         use Location::*;
         match self {
-            imm8 | imm16 | imm32 | imm64 | m8 | m16 | m32 | m64 | m128 => None,
+            imm8 | imm16 | imm32 | imm64 | m8 | m16 | m32 | m64 | m128 | m256 | m512 => None,
             al | ax | eax | rax | rbx | cl | rcx | dx | edx | rdx | r8 | r16 | r32 | r32a
             | r32b | r64 | r64a | r64b | rm8 | rm16 | rm32 | rm64 => Some(RegClass::Gpr),
             xmm1 | xmm2 | xmm3 | xmm_m8 | xmm_m16 | xmm_m32 | xmm_m64 | xmm_m128 | xmm0 => {
                 Some(RegClass::Xmm)
             }
+            ymm1 | ymm_m256 => Some(RegClass::Ymm),
+            zmm1 | zmm2 | zmm3 | zmm_m512 => Some(RegClass::Zmm),
+            k1 | k2 | k3 => Some(RegClass::Kmask),
         }
     }
 }
@@ -473,6 +545,20 @@ impl core::fmt::Display for Location {
             m32 => write!(f, "m32"),
             m64 => write!(f, "m64"),
             m128 => write!(f, "m128"),
+            m256 => write!(f, "m256"),
+            m512 => write!(f, "m512"),
+
+            ymm1 => write!(f, "ymm1"),
+            ymm_m256 => write!(f, "ymm_m256"),
+
+            zmm1 => write!(f, "zmm1"),
+            zmm2 => write!(f, "zmm2"),
+            zmm3 => write!(f, "zmm3"),
+            zmm_m512 => write!(f, "zmm_m512"),
+
+            k1 => write!(f, "k1"),
+            k2 => write!(f, "k2"),
+            k3 => write!(f, "k3"),
         }
     }
 }

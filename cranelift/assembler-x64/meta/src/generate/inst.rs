@@ -157,7 +157,7 @@ impl dsl::Inst {
                     );
                 }
                 RegMem(_) => {
-                    let ty = op.reg_class().unwrap();
+                    let ty = op.reg_class().unwrap().mem_type_name();
                     f.add_block(&format!("if let {ty}Mem::Mem({op}) = &self.{op}"), |f| {
                         f.add_block(&format!("if let Some(trap_code) = {op}.trap_code()"), |f| {
                             fmtln!(f, "buf.add_trap(trap_code);");
@@ -200,18 +200,17 @@ impl dsl::Inst {
                         fmtln!(f, "let _ = visitor;");
                     }
                     FixedReg(loc) => {
-                        let reg_lower = reg.unwrap().to_string().to_lowercase();
+                        let visitor_suffix = reg.unwrap().visitor_suffix();
                         fmtln!(f, "let enc = self.{loc}.expected_enc();");
-                        fmtln!(f, "visitor.fixed_{mutability}_{reg_lower}(&mut self.{loc}.0, enc);");
+                        fmtln!(f, "visitor.fixed_{mutability}_{visitor_suffix}(&mut self.{loc}.0, enc);");
                     }
                     Reg(loc) => {
-                        let reg_lower = reg.unwrap().to_string().to_lowercase();
-                        fmtln!(f, "visitor.{mutability}_{reg_lower}(self.{loc}.as_mut());");
+                        let visitor_suffix = reg.unwrap().visitor_suffix();
+                        fmtln!(f, "visitor.{mutability}_{visitor_suffix}(self.{loc}.as_mut());");
                     }
                     RegMem(loc) => {
-                        let reg = reg.unwrap();
-                        let reg_lower = reg.to_string().to_lowercase();
-                        fmtln!(f, "visitor.{mutability}_{reg_lower}_mem(&mut self.{loc});");
+                        let visitor_suffix = reg.unwrap().visitor_suffix();
+                        fmtln!(f, "visitor.{mutability}_{visitor_suffix}_mem(&mut self.{loc});");
                     }
                     Mem(loc) => {
                         // Note that this is always "read" because from a
@@ -285,7 +284,53 @@ impl dsl::Inst {
                             let to_string = location.generate_to_string(op.extension);
                             fmtln!(f, "let {location} = {to_string};");
                         }
-                        let ordered_ops = self.format.generate_att_style_operands();
+                        // Check if this instruction has EVEX encoding with masking
+                        let (has_masking, uses_zeroing) = match &self.encoding {
+                            crate::dsl::Encoding::Evex(evex) => {
+                                (evex.supports_masking(), evex.uses_zeroing())
+                            }
+                            _ => (false, false),
+                        };
+
+                        // Find mask operand location for k0 check
+                        let mask_loc = if has_masking {
+                            self.format.operands.iter().find(|o| {
+                                !o.implicit
+                                    && matches!(o.location.reg_class(), Some(crate::dsl::RegClass::Kmask))
+                                    && o.mutability.is_read()
+                                    && !o.mutability.is_write()
+                            }).map(|o| o.location)
+                        } else {
+                            None
+                        };
+
+                        // Generate mask suffix computation if masking is enabled
+                        // k0 means "no masking" so we don't display it (except when zeroing)
+                        if let Some(mask_loc) = mask_loc {
+                            if uses_zeroing {
+                                // For zero-masking: always show mask and {z}
+                                // {{{{z}}}} becomes {{z}} in generated code, which format! renders as literal {z}
+                                fmtln!(
+                                    f,
+                                    "let mask_suffix = format!(\" {{{{{{{mask_loc}}}}}}} {{{{z}}}}\");"
+                                );
+                            } else {
+                                // For merge-masking: don't show k0
+                                fmtln!(
+                                    f,
+                                    "let mask_suffix = if self.{mask_loc}.enc() == 0 {{ \"\".to_string() }} else {{ format!(\" {{{{{{{mask_loc}}}}}}}\") }};"
+                                );
+                            }
+                        }
+
+                        let ordered_ops = self
+                            .format
+                            .generate_att_style_operands_without_mask(has_masking);
+                        let mask_part = if mask_loc.is_some() {
+                            "{mask_suffix}"
+                        } else {
+                            ""
+                        };
                         let mut implicit_ops = self.format.generate_implicit_operands();
                         if self.has_trap {
                             fmtln!(f, "let trap = self.trap;");
@@ -295,7 +340,7 @@ impl dsl::Inst {
                                 implicit_ops.push_str(", {trap}");
                             }
                         }
-                        fmtln!(f, "write!(f, \"{{name}} {ordered_ops}{implicit_ops}\")");
+                        fmtln!(f, "write!(f, \"{{name}} {ordered_ops}{mask_part}{implicit_ops}\")");
                     },
                 );
             },

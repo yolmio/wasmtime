@@ -609,6 +609,23 @@ pub trait ABIMachineSpec {
         let _ = callee_conv;
         &[]
     }
+
+    /// Get the canonical type for spilling a value of the given register class.
+    /// This may differ from `MachInst::canonical_type_for_rc` when the target
+    /// supports larger vector sizes (e.g., AVX-512 on x64).
+    fn canonical_spill_type(rc: RegClass, isa_flags: &Self::F) -> Type {
+        let _ = isa_flags;
+        Self::I::canonical_type_for_rc(rc)
+    }
+
+    /// Get the default maximum vector size in bytes for spillslot calculation.
+    /// This is used when no dynamic types are present to determine spillslot size.
+    /// Returns 16 (128 bits) by default, but may be overridden for targets with
+    /// larger vector registers (e.g., 64 bytes for AVX-512).
+    fn default_vector_bytes(isa_flags: &Self::F) -> u32 {
+        let _ = isa_flags;
+        16 // Default: 128-bit vectors (XMM)
+    }
 }
 
 /// Out-of-line data for calls, to keep the size of `Inst` down.
@@ -2369,7 +2386,8 @@ impl<M: ABIMachineSpec> Callee<M> {
     /// Get the spill-slot size.
     pub fn get_spillslot_size(&self, rc: RegClass) -> u32 {
         let max = if self.dynamic_type_sizes.len() == 0 {
-            16
+            // No dynamic types - use the default max vector size for this target
+            M::default_vector_bytes(&self.isa_flags)
         } else {
             *self
                 .dynamic_type_sizes
@@ -2381,6 +2399,11 @@ impl<M: ABIMachineSpec> Callee<M> {
         M::get_number_of_spillslots_for_value(rc, max, &self.isa_flags)
     }
 
+    /// Get the canonical type for reg-to-reg moves, using ISA flags when needed.
+    pub fn canonical_type_for_rc(&self, rc: RegClass) -> Type {
+        M::canonical_spill_type(rc, &self.isa_flags)
+    }
+
     /// Get the spill slot offset relative to the fixed allocation area start.
     pub fn get_spillslot_offset(&self, slot: SpillSlot) -> i64 {
         self.frame_layout().spillslot_offset(slot)
@@ -2388,11 +2411,10 @@ impl<M: ABIMachineSpec> Callee<M> {
 
     /// Generate a spill.
     pub fn gen_spill(&self, to_slot: SpillSlot, from_reg: RealReg) -> M::I {
-        let ty = M::I::canonical_type_for_rc(from_reg.class());
-        debug_assert_eq!(<M>::I::rc_for_type(ty).unwrap().1, &[ty]);
+        let ty = M::canonical_spill_type(from_reg.class(), &self.isa_flags);
 
         let sp_off = self.get_spillslot_offset(to_slot);
-        trace!("gen_spill: {from_reg:?} into slot {to_slot:?} at offset {sp_off}");
+        trace!("gen_spill: {from_reg:?} into slot {to_slot:?} at offset {sp_off} (ty={ty})");
 
         let from = StackAMode::Slot(sp_off);
         <M>::gen_store_stack(from, Reg::from(from_reg), ty)
@@ -2400,11 +2422,10 @@ impl<M: ABIMachineSpec> Callee<M> {
 
     /// Generate a reload (fill).
     pub fn gen_reload(&self, to_reg: Writable<RealReg>, from_slot: SpillSlot) -> M::I {
-        let ty = M::I::canonical_type_for_rc(to_reg.to_reg().class());
-        debug_assert_eq!(<M>::I::rc_for_type(ty).unwrap().1, &[ty]);
+        let ty = M::canonical_spill_type(to_reg.to_reg().class(), &self.isa_flags);
 
         let sp_off = self.get_spillslot_offset(from_slot);
-        trace!("gen_reload: {to_reg:?} from slot {from_slot:?} at offset {sp_off}");
+        trace!("gen_reload: {to_reg:?} from slot {from_slot:?} at offset {sp_off} (ty={ty})");
 
         let from = StackAMode::Slot(sp_off);
         <M>::gen_load_stack(from, to_reg.map(Reg::from), ty)

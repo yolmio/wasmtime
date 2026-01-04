@@ -30,14 +30,16 @@ fn rust_param_raw(op: &Operand) -> String {
             }
         }
         OperandKind::RegMem(rm) => {
-            let reg = rm.reg_class().unwrap();
+            let reg = rm.reg_class().unwrap().isle_type_name();
             let aligned = if op.align { "Aligned" } else { "" };
             format!("&{reg}Mem{aligned}")
         }
         OperandKind::Mem(_) => {
             format!("&SyntheticAmode")
         }
-        OperandKind::Reg(r) | OperandKind::FixedReg(r) => r.reg_class().unwrap().to_string(),
+        OperandKind::Reg(r) | OperandKind::FixedReg(r) => {
+            r.reg_class().unwrap().isle_type_name().to_string()
+        }
     }
 }
 
@@ -56,7 +58,7 @@ fn rust_convert_isle_to_assembler(op: &Operand) -> String {
             format!("{ASM}::{ty}{bits}::new({loc})")
         }
         OperandKind::FixedReg(r) => {
-            let reg = r.reg_class().unwrap().to_string().to_lowercase();
+            let reg = r.reg_class().unwrap().visitor_suffix();
             match op.mutability {
                 Mutability::Read => format!("{ASM}::Fixed({r})"),
                 Mutability::Write => {
@@ -68,8 +70,8 @@ fn rust_convert_isle_to_assembler(op: &Operand) -> String {
             }
         }
         OperandKind::Reg(r) => {
-            let reg = r.reg_class().unwrap();
-            let reg_lower = reg.to_string().to_lowercase();
+            let reg = r.reg_class().unwrap().isle_type_name();
+            let reg_lower = r.reg_class().unwrap().visitor_suffix();
             match op.mutability {
                 Mutability::Read => {
                     format!("{ASM}::{reg}::new({r})")
@@ -83,7 +85,7 @@ fn rust_convert_isle_to_assembler(op: &Operand) -> String {
             }
         }
         OperandKind::RegMem(rm) => {
-            let reg = rm.reg_class().unwrap().to_string().to_lowercase();
+            let reg = rm.reg_class().unwrap().visitor_suffix();
             let mut_ = op.mutability.generate_snake_case();
             let align = if op.align { "_aligned" } else { "" };
             format!("self.convert_{reg}_mem_to_assembler_{mut_}_{reg}_mem{align}({rm})")
@@ -157,8 +159,9 @@ fn generate_macro_inst_fn(f: &mut Formatter, inst: &Inst) {
                 Mutability::ReadWrite => "write.to_reg()",
             };
             let ty_var_of_reg = |loc: Location| {
-                let ty = loc.reg_class().unwrap().to_string();
-                let var = ty.to_lowercase();
+                let reg_class = loc.reg_class().unwrap();
+                let ty = reg_class.isle_type_name();
+                let var = reg_class.visitor_suffix();
                 (ty, var)
             };
             match results.as_slice() {
@@ -254,7 +257,9 @@ fn isle_param_raw(op: &Operand) -> String {
                 format!("u{bits}")
             }
         }
-        OperandKind::Reg(r) | OperandKind::FixedReg(r) => r.reg_class().unwrap().to_string(),
+        OperandKind::Reg(r) | OperandKind::FixedReg(r) => {
+            r.reg_class().unwrap().isle_type_name().to_string()
+        }
         OperandKind::Mem(_) => {
             if op.align {
                 unimplemented!("no way yet to mark an SyntheticAmode as aligned")
@@ -263,7 +268,7 @@ fn isle_param_raw(op: &Operand) -> String {
             }
         }
         OperandKind::RegMem(rm) => {
-            let reg = rm.reg_class().unwrap();
+            let reg = rm.reg_class().unwrap().isle_type_name();
             let aligned = if op.align { "Aligned" } else { "" };
             format!("{reg}Mem{aligned}")
         }
@@ -291,6 +296,9 @@ enum IsleConstructor {
     /// This is similar to `RetGpr`, but for XMM registers.
     RetXmm,
 
+    /// This is similar to `RetGpr`, but for k-mask registers.
+    RetKmask,
+
     /// This "special" constructor captures multiple written-to registers (e.g.
     /// `mul`).
     RetValueRegs,
@@ -313,6 +321,7 @@ impl IsleConstructor {
         match self {
             IsleConstructor::RetGpr => "Gpr",
             IsleConstructor::RetXmm => "Xmm",
+            IsleConstructor::RetKmask => "Kmask",
             IsleConstructor::RetValueRegs => "ValueRegs",
             IsleConstructor::NoReturnSideEffect | IsleConstructor::RetMemorySideEffect => {
                 "SideEffectNoResult"
@@ -331,6 +340,7 @@ impl IsleConstructor {
             }
             IsleConstructor::RetGpr => "emit_ret_gpr",
             IsleConstructor::RetXmm => "emit_ret_xmm",
+            IsleConstructor::RetKmask => "emit_ret_kmask",
             IsleConstructor::RetValueRegs => "emit_ret_value_regs",
             IsleConstructor::ProducesFlagsSideEffect => "asm_produce_flags_side_effect",
             IsleConstructor::ConsumesFlagsReturnsGpr => "asm_consumes_flags_returns_gpr",
@@ -343,6 +353,7 @@ impl IsleConstructor {
             IsleConstructor::RetMemorySideEffect => "_mem",
             IsleConstructor::RetGpr
             | IsleConstructor::RetXmm
+            | IsleConstructor::RetKmask
             | IsleConstructor::RetValueRegs
             | IsleConstructor::NoReturnSideEffect
             | IsleConstructor::ProducesFlagsSideEffect
@@ -360,6 +371,7 @@ impl IsleConstructor {
             IsleConstructor::RetMemorySideEffect => true,
             IsleConstructor::RetGpr
             | IsleConstructor::RetXmm
+            | IsleConstructor::RetKmask
             | IsleConstructor::RetValueRegs
             | IsleConstructor::NoReturnSideEffect
             | IsleConstructor::ProducesFlagsSideEffect
@@ -381,6 +393,7 @@ fn isle_param_for_ctor(op: &Operand, ctor: IsleConstructor) -> String {
             IsleConstructor::NoReturnSideEffect => "".to_string(),
             IsleConstructor::RetGpr | IsleConstructor::ConsumesFlagsReturnsGpr => "Gpr".to_string(),
             IsleConstructor::RetXmm => "Xmm".to_string(),
+            IsleConstructor::RetKmask => "Kmask".to_string(),
             IsleConstructor::RetValueRegs => "ValueRegs".to_string(),
             IsleConstructor::ProducesFlagsSideEffect => todo!(),
         },
@@ -419,7 +432,7 @@ fn isle_constructors(format: &Format) -> Vec<IsleConstructor> {
                 // One read/write register output? Output the instruction
                 // and that register.
                 Reg(r) | FixedReg(r) => match r.reg_class().unwrap() {
-                    RegClass::Xmm => {
+                    RegClass::Xmm | RegClass::Ymm | RegClass::Zmm => {
                         assert!(!format.eflags.is_read());
                         vec![IsleConstructor::RetXmm]
                     }
@@ -430,6 +443,10 @@ fn isle_constructors(format: &Format) -> Vec<IsleConstructor> {
                             vec![IsleConstructor::RetGpr]
                         }
                     }
+                    RegClass::Kmask => {
+                        assert!(!format.eflags.is_read());
+                        vec![IsleConstructor::RetKmask]
+                    }
                 },
                 // One read/write memory operand? Output a side effect.
                 Mem(_) => {
@@ -439,7 +456,7 @@ fn isle_constructors(format: &Format) -> Vec<IsleConstructor> {
                 // One read/write reg-mem output? We need constructors for
                 // both variants.
                 RegMem(rm) => match rm.reg_class().unwrap() {
-                    RegClass::Xmm => {
+                    RegClass::Xmm | RegClass::Ymm | RegClass::Zmm => {
                         assert!(!format.eflags.is_read());
                         vec![
                             IsleConstructor::RetXmm,
@@ -460,6 +477,13 @@ fn isle_constructors(format: &Format) -> Vec<IsleConstructor> {
                                 IsleConstructor::RetMemorySideEffect,
                             ]
                         }
+                    }
+                    RegClass::Kmask => {
+                        assert!(!format.eflags.is_read());
+                        vec![
+                            IsleConstructor::RetKmask,
+                            IsleConstructor::RetMemorySideEffect,
+                        ]
                     }
                 },
             },
@@ -607,6 +631,7 @@ fn generate_isle_inst_decls(f: &mut Formatter, inst: &Inst) {
                         "(temp_writable_gpr)"
                     }
                     IsleConstructor::RetXmm => "(temp_writable_xmm)",
+                    IsleConstructor::RetKmask => "(temp_writable_kmask)",
                     IsleConstructor::RetValueRegs | IsleConstructor::ProducesFlagsSideEffect => {
                         todo!()
                     }
@@ -669,6 +694,9 @@ pub fn generate_isle(f: &mut Formatter, insts: &[Inst]) {
     fmtln!(f, "    ;; Used for instructions that return an");
     fmtln!(f, "    ;; XMM register.");
     fmtln!(f, "    (RetXmm (inst MInst) (xmm Xmm))");
+    fmtln!(f, "    ;; Used for instructions that return a");
+    fmtln!(f, "    ;; k-mask register.");
+    fmtln!(f, "    (RetKmask (inst MInst) (kmask Kmask))");
     fmtln!(f, "    ;; Used for multi-return instructions.");
     fmtln!(f, "    (RetValueRegs (inst MInst) (regs ValueRegs))");
     fmtln!(
@@ -689,6 +717,16 @@ pub fn generate_isle(f: &mut Formatter, insts: &[Inst]) {
     fmtln!(f, "(decl emit_ret_xmm (AssemblerOutputs) Xmm)");
     fmtln!(f, "(rule (emit_ret_xmm (AssemblerOutputs.RetXmm inst xmm))");
     fmtln!(f, "    (let ((_ Unit (emit inst))) xmm))");
+    f.empty_line();
+
+    fmtln!(f, ";; Directly emit instructions that return a");
+    fmtln!(f, ";; k-mask register.");
+    fmtln!(f, "(decl emit_ret_kmask (AssemblerOutputs) Kmask)");
+    fmtln!(
+        f,
+        "(rule (emit_ret_kmask (AssemblerOutputs.RetKmask inst kmask))"
+    );
+    fmtln!(f, "    (let ((_ Unit (emit inst))) kmask))");
     f.empty_line();
 
     fmtln!(f, ";; Directly emit instructions that return multiple");
