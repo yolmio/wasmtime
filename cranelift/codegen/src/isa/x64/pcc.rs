@@ -213,6 +213,15 @@ pub(crate) fn check(
 
         Inst::SequencePoint { .. } => Ok(()),
 
+        // AVX-512 instructions (manual implementations)
+        // For now, we don't perform PCC verification on SIMD operations
+        Inst::Avx512KmovKK { .. }
+        | Inst::Avx512KmovLoad { .. }
+        | Inst::Avx512KmovStore { .. }
+        | Inst::Avx512Gather { .. }
+        | Inst::Avx512Scatter { .. }
+        | Inst::Avx512Vp2Intersect { .. } => Ok(()),
+
         Inst::External { .. } => Ok(()), // TODO: unsure what to do about this!
     }
 }

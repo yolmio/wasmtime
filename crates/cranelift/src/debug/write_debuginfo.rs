@@ -5,11 +5,8 @@ use cranelift_codegen::isa::{
     TargetIsa,
     unwind::{CfaUnwindInfo, UnwindInfo},
 };
-use gimli::write::{
-    Address, Dwarf, EndianVec, FrameTable, Result as WriteResult, Sections, Writer,
-};
+use gimli::write::{Address, Dwarf, EndianVec, FrameTable, Result, Sections, Writer};
 use gimli::{RunTimeEndian, SectionId};
-use wasmtime_environ::error::Result as EnvResult;
 
 pub struct DwarfSection {
     pub name: &'static str,
@@ -35,7 +32,7 @@ fn emit_dwarf_sections(
     isa: &dyn TargetIsa,
     mut dwarf: Dwarf,
     frames: Option<FrameTable>,
-) -> EnvResult<Vec<DwarfSection>> {
+) -> wasmtime_environ::error::Result<Vec<DwarfSection>> {
     let endian = match isa.endianness() {
         Endianness::Little => RunTimeEndian::Little,
         Endianness::Big => RunTimeEndian::Big,
@@ -51,7 +48,7 @@ fn emit_dwarf_sections(
     }
 
     let mut result = Vec::new();
-    sections.for_each_mut(|id, s| -> EnvResult<()> {
+    sections.for_each_mut(|id, s| -> wasmtime_environ::error::Result<()> {
         let name = id.name();
         let body = s.writer.take();
         if body.is_empty() {
@@ -83,15 +80,15 @@ impl Writer for WriterRelocate {
         self.writer.len()
     }
 
-    fn write(&mut self, bytes: &[u8]) -> WriteResult<()> {
+    fn write(&mut self, bytes: &[u8]) -> Result<()> {
         self.writer.write(bytes)
     }
 
-    fn write_at(&mut self, offset: usize, bytes: &[u8]) -> WriteResult<()> {
+    fn write_at(&mut self, offset: usize, bytes: &[u8]) -> Result<()> {
         self.writer.write_at(offset, bytes)
     }
 
-    fn write_address(&mut self, address: Address, size: u8) -> WriteResult<()> {
+    fn write_address(&mut self, address: Address, size: u8) -> Result<()> {
         match address {
             Address::Constant(val) => self.write_udata(val, size),
             Address::Symbol { symbol, addend } => {
@@ -107,7 +104,7 @@ impl Writer for WriterRelocate {
         }
     }
 
-    fn write_offset(&mut self, val: usize, section: SectionId, size: u8) -> WriteResult<()> {
+    fn write_offset(&mut self, val: usize, section: SectionId, size: u8) -> Result<()> {
         let offset = self.len() as u32;
         let target = DwarfSectionRelocTarget::Section(section.name());
         self.relocs.push(DwarfSectionReloc {
@@ -125,7 +122,7 @@ impl Writer for WriterRelocate {
         val: usize,
         section: SectionId,
         size: u8,
-    ) -> WriteResult<()> {
+    ) -> Result<()> {
         let target = DwarfSectionRelocTarget::Section(section.name());
         self.relocs.push(DwarfSectionReloc {
             target,
@@ -168,7 +165,7 @@ fn create_frame_table(
 pub fn emit_dwarf(
     isa: &dyn TargetIsa,
     compilation: &mut Compilation<'_>,
-) -> EnvResult<Vec<DwarfSection>> {
+) -> wasmtime_environ::error::Result<Vec<DwarfSection>> {
     let dwarf = transform_dwarf(isa, compilation)?;
     let frame_table = create_frame_table(isa, compilation);
     let sections = emit_dwarf_sections(isa, dwarf, frame_table)?;

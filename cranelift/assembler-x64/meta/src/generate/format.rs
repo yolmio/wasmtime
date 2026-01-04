@@ -54,14 +54,128 @@ impl dsl::Format {
     /// once Cranelift has switched to using this assembler predominantly
     /// (TODO).
     #[must_use]
+    #[allow(
+        dead_code,
+        reason = "Will be used when switching to Intel-style printing"
+    )]
     pub(crate) fn generate_att_style_operands(&self) -> String {
-        let ordered_ops: Vec<_> = self
+        self.generate_att_style_operands_with_masking(false, false)
+    }
+
+    /// Generate AT&T-style operand string, with optional masking support.
+    ///
+    /// If `has_masking` is true and a mask operand is found, it will be appended
+    /// to the destination. If `uses_zeroing` is also true, `{z}` will be added.
+    #[must_use]
+    pub(crate) fn generate_att_style_operands_with_masking(
+        &self,
+        has_masking: bool,
+        uses_zeroing: bool,
+    ) -> String {
+        // A mask operand is a read-only k-register, but ONLY if:
+        // 1. The encoding supports masking (has_masking is true)
+        // 2. The k-register is read-only
+        let mask_operand = if has_masking {
+            self.operands
+                .iter()
+                .find(|o| {
+                    !o.implicit
+                        && matches!(o.location.reg_class(), Some(dsl::RegClass::Kmask))
+                        && o.mutability.is_read()
+                        && !o.mutability.is_write()
+                })
+                .map(|o| o.location)
+        } else {
+            None
+        };
+
+        // Filter out mask and implicit operands, then reverse for AT&T order
+        let mut ordered_ops: Vec<_> = self
             .operands
             .iter()
-            .filter(|o| !o.implicit)
+            .filter(|o| {
+                if o.implicit {
+                    return false;
+                }
+                // Only filter out the mask if we identified one
+                if mask_operand.is_some() {
+                    let is_kmask = matches!(o.location.reg_class(), Some(dsl::RegClass::Kmask));
+                    let is_read_only = o.mutability.is_read() && !o.mutability.is_write();
+                    if is_kmask && is_read_only {
+                        return false;
+                    }
+                }
+                true
+            })
             .rev()
             .map(|o| format!("{{{}}}", o.location))
             .collect();
+
+        // If there's a mask, append it to the destination (last in AT&T order = first after reverse)
+        if let Some(mask_loc) = mask_operand {
+            if let Some(last) = ordered_ops.last_mut() {
+                // Format: dst {%k1} - mask follows destination in curly braces
+                // We need the format string to contain {{{k1}}} which produces:
+                // - {{ → literal {
+                // - {k1} → value of k1 variable (like %k7)
+                // - }} → literal }
+                // To produce {{{k1}}} in the output string, we need 6 braces on each side
+                // because format! interprets {{ as literal {
+                if uses_zeroing {
+                    // Add {z} for zeroing-masking mode
+                    *last = format!("{last} {{{{{{{mask_loc}}}}}}} {{{{z}}}}");
+                } else {
+                    *last = format!("{last} {{{{{{{mask_loc}}}}}}}");
+                }
+            }
+        }
+
+        ordered_ops.join(", ")
+    }
+
+    /// Generate AT&T-style operand string, excluding the mask operand.
+    ///
+    /// The mask operand is handled separately to allow conditional display
+    /// (k0 means "no masking" and should not be displayed).
+    #[must_use]
+    pub(crate) fn generate_att_style_operands_without_mask(&self, has_masking: bool) -> String {
+        // Find the mask operand location if masking is enabled
+        let mask_operand = if has_masking {
+            self.operands
+                .iter()
+                .find(|o| {
+                    !o.implicit
+                        && matches!(o.location.reg_class(), Some(dsl::RegClass::Kmask))
+                        && o.mutability.is_read()
+                        && !o.mutability.is_write()
+                })
+                .map(|o| o.location)
+        } else {
+            None
+        };
+
+        // Filter out mask and implicit operands, then reverse for AT&T order
+        let ordered_ops: Vec<_> = self
+            .operands
+            .iter()
+            .filter(|o| {
+                if o.implicit {
+                    return false;
+                }
+                // Filter out the mask operand - it's handled separately
+                if mask_operand.is_some() {
+                    let is_kmask = matches!(o.location.reg_class(), Some(dsl::RegClass::Kmask));
+                    let is_read_only = o.mutability.is_read() && !o.mutability.is_write();
+                    if is_kmask && is_read_only {
+                        return false;
+                    }
+                }
+                true
+            })
+            .rev()
+            .map(|o| format!("{{{}}}", o.location))
+            .collect();
+
         ordered_ops.join(", ")
     }
 
@@ -247,7 +361,7 @@ impl dsl::Format {
         let bcast = false;
         fmtln!(f, "let bcast = {bcast};");
         let bits = format!("ll, pp, mmm, w, bcast");
-        let is4 = false;
+        let _is4 = false;
 
         let length_bytes = match evex.length {
             dsl::Length::LZ | dsl::Length::LIG => unimplemented!(),
@@ -269,13 +383,25 @@ impl dsl::Format {
                 length_bytes / 2
             }
             dsl::TupleType::FullMem => length_bytes,
-            // FIXME: according to table 2-35 this needs to take into account
-            // "InputSize" which isn't accounted for in our `Evex` structure at
-            // this time.
-            dsl::TupleType::Tuple1Scalar => unimplemented!(),
+            // Tuple1Scalar: scaling factor is the input element size
+            // W=0: 4 bytes (32-bit), W=1: 8 bytes (64-bit)
+            dsl::TupleType::Tuple1Scalar => {
+                if evex.w.as_bool() {
+                    8
+                } else {
+                    4
+                }
+            }
             dsl::TupleType::Tuple1Fixed => unimplemented!(),
             dsl::TupleType::Tuple2 => unimplemented!(),
-            dsl::TupleType::Tuple4 => unimplemented!(),
+            // Tuple4: 4 elements × element size (W=0: 4 bytes, W=1: 8 bytes)
+            dsl::TupleType::Tuple4 => {
+                if evex.w.as_bool() {
+                    32 // 4 × 8 bytes
+                } else {
+                    16 // 4 × 4 bytes
+                }
+            }
             dsl::TupleType::Tuple8 => 32,
             dsl::TupleType::HalfMem => length_bytes / 2,
             dsl::TupleType::QuarterMem => length_bytes / 4,
@@ -289,9 +415,227 @@ impl dsl::Format {
             },
         });
 
-        self.generate_vex_or_evex_prefix(f, "EvexPrefix", &bits, is4, evex_scaling, || {
-            evex.unwrap_digit()
-        })
+        self.generate_evex_prefix_inner(f, evex, &bits, evex_scaling)
+    }
+
+    /// Generate EVEX prefix code, handling both masked and non-masked cases.
+    fn generate_evex_prefix_inner(
+        &self,
+        f: &mut Formatter,
+        evex: &dsl::Evex,
+        bits: &str,
+        evex_scaling: Option<i8>,
+    ) -> ModRmStyle {
+        use dsl::OperandKind::{FixedReg, Imm, Mem, Reg, RegMem};
+
+        // Find mask register if this instruction supports masking.
+        // The mask is a READ operand (k1-k7) that controls which elements are written.
+        // It's distinct from k-register destinations (WRITE operands) in mask conversion ops.
+        let mask_operand = if evex.supports_masking() {
+            self.operands
+                .iter()
+                .find(|o| {
+                    matches!(o.location.reg_class(), Some(dsl::RegClass::Kmask))
+                        && o.mutability.is_read()
+                        && !o.mutability.is_write()
+                })
+                .map(|o| o.location)
+        } else {
+            None
+        };
+
+        // Generate mask-related code if masking is enabled
+        if let Some(mask_loc) = mask_operand {
+            fmtln!(f, "let aaa = self.{mask_loc}.enc();");
+            fmtln!(f, "let z = {};", evex.uses_zeroing());
+        }
+
+        // Filter out the mask operand for pattern matching (it's handled separately).
+        // Only filter k-registers when this instruction supports masking AND
+        // the k-register is read-only (i.e., it's a mask, not a source operand).
+        let operands_without_mask: Vec<_> = self
+            .operands
+            .iter()
+            .filter(|o| {
+                if mask_operand.is_some() {
+                    // Only filter if we found a mask operand AND this operand matches it
+                    let is_kmask = matches!(o.location.reg_class(), Some(dsl::RegClass::Kmask));
+                    let is_read_only = o.mutability.is_read() && !o.mutability.is_write();
+                    // Filter out (return false) only for the mask operand
+                    !(is_kmask && is_read_only)
+                } else {
+                    // No masking enabled, keep all operands
+                    true
+                }
+            })
+            .map(|o| o.location.kind())
+            .collect();
+
+        let style = match operands_without_mask.as_slice() {
+            [Reg(reg), Reg(vvvv), Reg(rm)] => {
+                fmtln!(f, "let reg = self.{reg}.enc();");
+                fmtln!(f, "let vvvv = self.{vvvv}.enc();");
+                fmtln!(f, "let rm = self.{rm}.encode_bx_regs();");
+                if mask_operand.is_some() {
+                    fmtln!(
+                        f,
+                        "let prefix = EvexPrefix::three_op_masked(reg, vvvv, rm, {bits}, aaa, z);"
+                    );
+                } else {
+                    fmtln!(
+                        f,
+                        "let prefix = EvexPrefix::three_op(reg, vvvv, rm, {bits});"
+                    );
+                }
+                ModRmStyle::Reg {
+                    reg: ModRmReg::Reg(*reg),
+                    rm: *rm,
+                }
+            }
+            [Reg(reg), Reg(vvvv), RegMem(rm)]
+            | [Reg(reg), Reg(vvvv), Mem(rm)]
+            | [Reg(reg), Reg(vvvv), RegMem(rm), Imm(_) | FixedReg(_)]
+            | [Reg(reg), RegMem(rm), Reg(vvvv)] => {
+                fmtln!(f, "let reg = self.{reg}.enc();");
+                fmtln!(f, "let vvvv = self.{vvvv}.enc();");
+                fmtln!(f, "let rm = self.{rm}.encode_bx_regs();");
+                if mask_operand.is_some() {
+                    fmtln!(
+                        f,
+                        "let prefix = EvexPrefix::three_op_masked(reg, vvvv, rm, {bits}, aaa, z);"
+                    );
+                } else {
+                    fmtln!(
+                        f,
+                        "let prefix = EvexPrefix::three_op(reg, vvvv, rm, {bits});"
+                    );
+                }
+                ModRmStyle::RegMem {
+                    reg: ModRmReg::Reg(*reg),
+                    rm: *rm,
+                    evex_scaling,
+                }
+            }
+            [Reg(reg_or_vvvv), RegMem(rm)]
+            | [RegMem(rm), Reg(reg_or_vvvv)]
+            | [Reg(reg_or_vvvv), RegMem(rm), Imm(_)] => match evex.unwrap_digit() {
+                Some(digit) => {
+                    let vvvv = reg_or_vvvv;
+                    fmtln!(f, "let reg = {digit:#x};");
+                    fmtln!(f, "let vvvv = self.{vvvv}.enc();");
+                    fmtln!(f, "let rm = self.{rm}.encode_bx_regs();");
+                    if mask_operand.is_some() {
+                        fmtln!(
+                            f,
+                            "let prefix = EvexPrefix::three_op_masked(reg, vvvv, rm, {bits}, aaa, z);"
+                        );
+                    } else {
+                        fmtln!(
+                            f,
+                            "let prefix = EvexPrefix::three_op(reg, vvvv, rm, {bits});"
+                        );
+                    }
+                    ModRmStyle::RegMem {
+                        reg: ModRmReg::Digit(digit),
+                        rm: *rm,
+                        evex_scaling,
+                    }
+                }
+                None => {
+                    let reg = reg_or_vvvv;
+                    fmtln!(f, "let reg = self.{reg}.enc();");
+                    fmtln!(f, "let rm = self.{rm}.encode_bx_regs();");
+                    if mask_operand.is_some() {
+                        fmtln!(
+                            f,
+                            "let prefix = EvexPrefix::two_op_masked(reg, rm, {bits}, aaa, z);"
+                        );
+                    } else {
+                        fmtln!(f, "let prefix = EvexPrefix::two_op(reg, rm, {bits});");
+                    }
+                    ModRmStyle::RegMem {
+                        reg: ModRmReg::Reg(*reg),
+                        rm: *rm,
+                        evex_scaling,
+                    }
+                }
+            },
+            [Reg(first), Reg(second)] | [Reg(first), Reg(second), Imm(_)] => {
+                match evex.unwrap_digit() {
+                    Some(digit) => {
+                        let vvvv = first;
+                        let rm_op = second;
+                        fmtln!(f, "let reg = {digit:#x};");
+                        fmtln!(f, "let vvvv = self.{vvvv}.enc();");
+                        fmtln!(f, "let rm = self.{rm_op}.encode_bx_regs();");
+                        if mask_operand.is_some() {
+                            fmtln!(
+                                f,
+                                "let prefix = EvexPrefix::three_op_masked(reg, vvvv, rm, {bits}, aaa, z);"
+                            );
+                        } else {
+                            fmtln!(
+                                f,
+                                "let prefix = EvexPrefix::three_op(reg, vvvv, rm, {bits});"
+                            );
+                        }
+                        ModRmStyle::Reg {
+                            reg: ModRmReg::Digit(digit),
+                            rm: *rm_op,
+                        }
+                    }
+                    None => {
+                        // For swapped encoding (like VPMOV* truncation), first operand
+                        // goes in r/m and second in reg. For normal encoding, first
+                        // goes in reg and second in r/m.
+                        let (reg_op, rm_op) = if evex.is_swapped() {
+                            (second, first)
+                        } else {
+                            (first, second)
+                        };
+                        fmtln!(f, "let reg = self.{reg_op}.enc();");
+                        fmtln!(f, "let rm = self.{rm_op}.encode_bx_regs();");
+                        if mask_operand.is_some() {
+                            fmtln!(
+                                f,
+                                "let prefix = EvexPrefix::two_op_masked(reg, rm, {bits}, aaa, z);"
+                            );
+                        } else {
+                            fmtln!(f, "let prefix = EvexPrefix::two_op(reg, rm, {bits});");
+                        }
+                        ModRmStyle::Reg {
+                            reg: ModRmReg::Reg(*reg_op),
+                            rm: *rm_op,
+                        }
+                    }
+                }
+            }
+            [Reg(reg), Mem(rm)] | [Mem(rm), Reg(reg)] | [RegMem(rm), Reg(reg), Imm(_)] => {
+                fmtln!(f, "let reg = self.{reg}.enc();");
+                fmtln!(f, "let rm = self.{rm}.encode_bx_regs();");
+                if mask_operand.is_some() {
+                    fmtln!(
+                        f,
+                        "let prefix = EvexPrefix::two_op_masked(reg, rm, {bits}, aaa, z);"
+                    );
+                } else {
+                    fmtln!(f, "let prefix = EvexPrefix::two_op(reg, rm, {bits});");
+                }
+                ModRmStyle::RegMem {
+                    reg: ModRmReg::Reg(*reg),
+                    rm: *rm,
+                    evex_scaling,
+                }
+            }
+            unknown => unimplemented!(
+                "unknown EVEX pattern: {unknown:?} (format: {}, operands: {:?})",
+                self.name,
+                self.operands
+            ),
+        };
+
+        fmtln!(f, "prefix.encode(buf);");
+        style
     }
 
     /// Helper function to generate either a vex or evex prefix, mostly handling

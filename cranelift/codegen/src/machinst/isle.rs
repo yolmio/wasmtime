@@ -17,6 +17,7 @@ pub type Unit = ();
 pub type ValueSlice = (ValueList, usize);
 pub type ValueArray2 = [Value; 2];
 pub type ValueArray3 = [Value; 3];
+pub type ValueArray4 = [Value; 4];
 pub type BlockArray2 = [BlockCall; 2];
 pub type WritableReg = Writable<Reg>;
 pub type VecRetPair = Vec<RetPair>;
@@ -218,7 +219,7 @@ macro_rules! isle_lower_prelude_methods {
                 _ => return None,
             };
             let ty = self.lower_ctx.output_ty(inst, 0);
-            let shift_amt = core::cmp::max(0, 64 - self.ty_bits(ty));
+            let shift_amt = std::cmp::max(0, 64 - self.ty_bits(ty));
             Some((constant << shift_amt) >> shift_amt)
         }
 
@@ -760,7 +761,7 @@ macro_rules! isle_lower_prelude_methods {
             &mut self,
             targets: &MachLabelSlice,
         ) -> Option<(MachLabel, BoxVecMachLabel)> {
-            use alloc::boxed::Box;
+            use std::boxed::Box;
             if targets.is_empty() {
                 return None;
             }

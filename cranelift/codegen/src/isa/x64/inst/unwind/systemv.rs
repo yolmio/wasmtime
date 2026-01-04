@@ -76,7 +76,10 @@ pub fn map_reg(reg: Reg) -> Result<Register, RegisterMappingError> {
             Ok(X86_GP_REG_MAP[reg.to_real_reg().unwrap().hw_enc() as usize])
         }
         RegClass::Float => Ok(X86_XMM_REG_MAP[reg.to_real_reg().unwrap().hw_enc() as usize]),
-        RegClass::Vector => unreachable!(),
+        // K-registers are volatile and don't need unwind info
+        RegClass::Vector => Err(RegisterMappingError::UnsupportedRegisterBank(
+            "K-registers are volatile and shouldn't appear in unwind info",
+        )),
     }
 }
 

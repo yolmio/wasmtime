@@ -17,6 +17,9 @@
 //!     type ReadXmm = u8;
 //!     type ReadWriteXmm = u8;
 //!     type WriteXmm = u8;
+//!     type ReadKmask = u8;
+//!     type ReadWriteKmask = u8;
+//!     type WriteKmask = u8;
 //! }
 //!
 //! // Then, build one of the `AND` instructions; this one operates on an
@@ -50,6 +53,7 @@ mod fixed;
 pub mod gpr;
 mod imm;
 pub mod inst;
+pub mod kmask;
 mod mem;
 mod rex;
 mod vex;
@@ -74,6 +78,7 @@ pub use features::{AvailableFeatures, Feature, Features};
 pub use fixed::Fixed;
 pub use gpr::{Gpr, NonRspGpr, Size};
 pub use imm::{Extension, Imm8, Imm16, Imm32, Imm64, Simm8, Simm16, Simm32};
+pub use kmask::Kmask;
 pub use mem::{
     Amode, AmodeOffset, AmodeOffsetPlusKnownOffset, DeferredTarget, GprMem, Scale, XmmMem,
 };

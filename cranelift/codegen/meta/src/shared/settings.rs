@@ -134,6 +134,20 @@ pub(crate) fn define() -> SettingGroup {
         false,
     );
 
+    settings.add_bool(
+        "enable_simd32",
+        "Enable the extended SIMD register file (x64 only).",
+        r#"
+            On x64 with AVX-512, this enables use of the extended SIMD registers
+            (xmm16-xmm31, also known as zmm16-zmm31). These registers require EVEX
+            encoding and are only available with AVX-512 instructions.
+
+            This should only be enabled when the target CPU supports AVX-512.
+            Enabling this on a CPU without AVX-512 will cause runtime failures.
+        "#,
+        false,
+    );
+
     settings.add_enum(
         "tls_model",
         "Defines the model used to perform TLS accesses.",

@@ -1990,6 +1990,31 @@
             (all_ones Xmm (vector_all_ones)))
            (x64_pxor checked all_ones)))
 
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; AVX-512 I8X64 vector comparisons (requires AVX-512BW)
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+;; I8X64 equality comparison - VPCMPEQB zmm, zmm, zmm
+(rule 10 (lower (icmp (IntCC.Equal) a @ (value_type (multi_lane 8 64)) b))
+      (if-let true (has_avx512bw))
+      (x64_512_vpcmpeqb a b))
+
+;; I8X64 not-equal - invert the equal result using VPTERNLOGD with NOT imm8
+(rule 10 (lower (icmp (IntCC.NotEqual) a @ (value_type (multi_lane 8 64)) b))
+      (if-let true (has_avx512bw))
+      (let ((checked Xmm (x64_512_vpcmpeqb a b)))
+           (x64_512_vpternlogd checked checked checked 0x55)))
+
+;; I8X64 signed greater-than - VPCMPGTB zmm, zmm, zmm
+(rule 10 (lower (icmp (IntCC.SignedGreaterThan) a @ (value_type (multi_lane 8 64)) b))
+      (if-let true (has_avx512bw))
+      (x64_512_vpcmpgtb a b))
+
+;; I8X64 signed less-than - reverse operands
+(rule 10 (lower (icmp (IntCC.SignedLessThan) a @ (value_type (multi_lane 8 64)) b))
+      (if-let true (has_avx512bw))
+      (x64_512_vpcmpgtb b a))
+
 ;; SSE `sgt`
 
 (rule (lower (icmp (IntCC.SignedGreaterThan) a @ (value_type (ty_vec128 ty)) b))
@@ -4783,6 +4808,20 @@
 ;; Additionally splats are specialized to special-case load-and-splat which
 ;; has a number of micro-optimizations available.
 
+;; ═══════════════════════════════════════════════════════════════════════════════
+;; AVX-512 I8X64 splat (requires AVX-512BW)
+;; ═══════════════════════════════════════════════════════════════════════════════
+
+;; I8X64 splat from GPR: VPBROADCASTB zmm, r32
+(rule 10 (lower (has_type (multi_lane 8 64) (splat src)))
+      (if-let true (has_avx512bw))
+      (x64_512_vpbroadcastb (RegMem.Reg (bitcast_gpr_to_xmm 32 src))))
+
+;; I8X64 splat from memory: VPBROADCASTB zmm, m8
+(rule 11 (lower (has_type (multi_lane 8 64) (splat (sinkable_load_exact addr))))
+      (if-let true (has_avx512bw))
+      (x64_512_vpbroadcastb addr))
+
 ;; i8x16 splats: use `vpbroadcastb` on AVX2 and otherwise `pshufb` broadcasts
 ;; with a mask of zero which is calculated with an xor-against-itself register.
 (rule 0 (lower (has_type $I8X16 (splat src)))
@@ -4936,6 +4975,31 @@
             (tmp Xmm (x64_packsswb src src))
             (tmp Gpr (x64_pmovmskb tmp)))
         (x64_shrq_mi tmp 8)))
+
+;; AVX-512: Extract high bits from 512-bit vectors (I32X16, I64X8)
+;; Use VPMOVD2M/VPMOVQ2M to convert vector to k-mask, then KMOVW to GPR.
+;; This enables efficient POPCNT-based lane counting.
+
+;; I32X16: VPMOVD2M extracts the sign bit of each 32-bit lane into k-register,
+;; then KMOVW moves the 16-bit mask to a GPR.
+(rule 20 (lower (vhigh_bits val @ (value_type (multi_lane 32 16))))
+      (if-let true (has_avx512dq))
+      (let ((kmask Kmask (x64_vpmovd2m_kz val)))
+        (x64_512_kmovw_gpr kmask)))
+
+;; I64X8: VPMOVQ2M extracts the sign bit of each 64-bit lane into k-register,
+;; then KMOVW moves the 8-bit mask to a GPR (only low 8 bits are meaningful).
+(rule 20 (lower (vhigh_bits val @ (value_type (multi_lane 64 8))))
+      (if-let true (has_avx512dq))
+      (let ((kmask Kmask (x64_vpmovq2m_kz val)))
+        (x64_512_kmovw_gpr kmask)))
+
+;; I8X64: VPMOVB2M extracts the sign bit of each 8-bit lane into k-register,
+;; then KMOVQ moves the 64-bit mask to a GPR (requires AVX-512BW).
+(rule 20 (lower (vhigh_bits val @ (value_type (multi_lane 8 64))))
+      (if-let true (has_avx512bw))
+      (let ((kmask Kmask (x64_vpmovb2m_kz val)))
+        (x64_512_kmovq_gpr kmask)))
 
 ;; Rules for `iconcat` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 

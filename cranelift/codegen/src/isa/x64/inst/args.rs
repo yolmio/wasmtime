@@ -7,8 +7,8 @@ use crate::ir::types::*;
 use crate::isa::x64::inst::Inst;
 use crate::isa::x64::inst::regs::pretty_print_reg;
 use crate::machinst::*;
-use alloc::string::String;
-use core::fmt;
+use std::fmt;
+use std::string::String;
 
 /// An extension trait for converting `Writable{Xmm,Gpr}` to `Writable<Reg>`.
 pub trait ToWritableReg {
@@ -87,7 +87,7 @@ macro_rules! newtype_of_reg {
         // NB: We cannot implement `DerefMut` because that would let people do
         // nasty stuff like `*my_gpr.deref_mut() = some_xmm_reg`, breaking the
         // invariants that `Gpr` provides.
-        impl core::ops::Deref for $newtype_reg {
+        impl std::ops::Deref for $newtype_reg {
             type Target = Reg;
 
             fn deref(&self) -> &Reg {
@@ -332,6 +332,49 @@ newtype_of_reg!(
     reg_mem_imm: (XmmMemImm, XmmMemAlignedImm aligned:true),
     |reg| reg.class() == RegClass::Float
 );
+
+// =================================================================
+// AVX-512 Extensions - Mask Register Support
+// =================================================================
+
+// Define a newtype of `Reg` for Mask (k-registers).
+// We use RegClass::Vector for k-registers (k1-k7, with k0 reserved).
+newtype_of_reg!(
+    Mask,
+    WritableMask,
+    OptionWritableMask,
+    reg_mem: (MaskMem),
+    reg_mem_imm: (MaskMemImm),
+    |reg| reg.class() == RegClass::Vector
+);
+
+/// Optional Mask register for AVX-512 masked operations.
+/// When `None`, no masking is applied (equivalent to k0).
+pub type OptionMaskReg = Option<Mask>;
+
+/// Returns `None` for optional mask register (no masking).
+pub fn option_mask_reg_none() -> OptionMaskReg {
+    None
+}
+
+/// Optional Reg for operations that may have an optional second operand (e.g., KNOT).
+pub type OptionReg = Option<Reg>;
+
+/// Returns `None` for optional register.
+pub fn option_reg_none() -> OptionReg {
+    None
+}
+
+/// Type alias for k-mask registers (used by assembler DSL).
+/// This maps to the same underlying type as `Mask` for register allocation.
+pub type Kmask = Mask;
+
+/// Type alias for writable k-mask registers (used by assembler DSL).
+pub type WritableKmask = WritableMask;
+
+// =================================================================
+// End AVX-512 Extensions
+// =================================================================
 
 // N.B.: `Amode` is defined in `inst.isle`. We add some convenience
 // constructors here.

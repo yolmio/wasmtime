@@ -1,0 +1,211 @@
+test compile
+target x86_64 has_avx512f has_avx512bw has_avx512dq has_avx512vl
+
+;; Basic 512-bit Integer Add (VPADDQ/VPADDD)
+function %iadd_i64x8(i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8):
+    v2 = iadd v0, v1
+    return v2
+}
+
+function %iadd_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = iadd v0, v1
+    return v2
+}
+
+;; Basic 512-bit Integer Subtract (VPSUBQ/VPSUBD)
+function %isub_i64x8(i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8):
+    v2 = isub v0, v1
+    return v2
+}
+
+function %isub_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = isub v0, v1
+    return v2
+}
+
+;; 512-bit Integer Multiply (VPMULLQ requires AVX512DQ)
+function %imul_i64x8(i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8):
+    v2 = imul v0, v1
+    return v2
+}
+
+function %imul_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = imul v0, v1
+    return v2
+}
+
+;; Bitwise Operations (VPANDQ/VPANDD, VPORQ/VPORD, VPXORQ/VPXORD)
+function %band_i64x8(i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8):
+    v2 = band v0, v1
+    return v2
+}
+
+function %bor_i64x8(i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8):
+    v2 = bor v0, v1
+    return v2
+}
+
+function %bxor_i64x8(i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8):
+    v2 = bxor v0, v1
+    return v2
+}
+
+;; 512-bit Floating-point Add/Sub/Mul/Div (VADDPD/VADDPS)
+function %fadd_f64x8(f64x8, f64x8) -> f64x8 {
+block0(v0: f64x8, v1: f64x8):
+    v2 = fadd v0, v1
+    return v2
+}
+
+function %fadd_f32x16(f32x16, f32x16) -> f32x16 {
+block0(v0: f32x16, v1: f32x16):
+    v2 = fadd v0, v1
+    return v2
+}
+
+function %fsub_f64x8(f64x8, f64x8) -> f64x8 {
+block0(v0: f64x8, v1: f64x8):
+    v2 = fsub v0, v1
+    return v2
+}
+
+function %fmul_f64x8(f64x8, f64x8) -> f64x8 {
+block0(v0: f64x8, v1: f64x8):
+    v2 = fmul v0, v1
+    return v2
+}
+
+function %fdiv_f64x8(f64x8, f64x8) -> f64x8 {
+block0(v0: f64x8, v1: f64x8):
+    v2 = fdiv v0, v1
+    return v2
+}
+
+;; Floating-point Sqrt (VSQRTPD/VSQRTPS)
+function %sqrt_f64x8(f64x8) -> f64x8 {
+block0(v0: f64x8):
+    v1 = sqrt v0
+    return v1
+}
+
+function %sqrt_f32x16(f32x16) -> f32x16 {
+block0(v0: f32x16):
+    v1 = sqrt v0
+    return v1
+}
+
+;; Integer negation (via vpsubd/vpsubq)
+function %ineg_i32x16(i32x16) -> i32x16 {
+block0(v0: i32x16):
+    v1 = ineg v0
+    return v1
+}
+
+function %ineg_i64x8(i64x8) -> i64x8 {
+block0(v0: i64x8):
+    v1 = ineg v0
+    return v1
+}
+
+;; 512-bit Splat operations (VPBROADCASTD/VPBROADCASTQ)
+function %splat_i32x16(i32) -> i32x16 {
+block0(v0: i32):
+    v1 = splat.i32x16 v0
+    return v1
+}
+
+function %splat_i64x8(i64) -> i64x8 {
+block0(v0: i64):
+    v1 = splat.i64x8 v0
+    return v1
+}
+
+;; Test splat with multiple values to check register allocation
+function %splat_multiple_i32x16(i32, i32) -> i32x16 {
+block0(v0: i32, v1: i32):
+    v2 = splat.i32x16 v0
+    v3 = splat.i32x16 v1
+    v4 = iadd v2, v3
+    return v4
+}
+
+;; Test that multiple 512-bit values remain intact after splat
+;; This simulates the pattern where we create iota_vec and all_ones_mask
+function %splat_liveness_test(i32, i32, i32x16) -> i32x16 {
+block0(v0: i32, v1: i32, v2: i32x16):
+    ;; v2 is a pre-existing i32x16 value (simulates iota_vec)
+    v3 = splat.i32x16 v0  ; Create first splat (simulates all_ones creation)
+    v4 = splat.i32x16 v1  ; Create second splat
+    ;; Now use v2 (the original i32x16) - this should still be valid
+    v5 = iadd v2, v3
+    v6 = iadd v5, v4
+    return v6
+}
+
+;; Test vconst for 512-bit types
+function %vconst_test() -> i32x16 {
+block0:
+    v0 = vconst.i32x16 [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15]
+    return v0
+}
+
+;; Test that mimics our vectorized pipeline pattern:
+;; - Create iota_vec (indices) and all_ones_mask outside loop
+;; - Use them in a loop with conditional branches
+;; - Accumulate results to force all operations to be emitted
+function %pipeline_pattern(i32, i64) -> i32x16 {
+block0(v0: i32, v1: i64):
+    ;; Create hoisted constants before loop (like our VecBatchSetup)
+    v2 = vconst.i32x16 [0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15]  ; iota_vec
+    v3 = iconst.i32 -1
+    v4 = splat.i32x16 v3  ; all_ones_mask
+    ;; Start with zeros as accumulator
+    v20 = iconst.i32 0
+    v21 = splat.i32x16 v20
+    jump block1(v0, v2, v4, v21)
+
+block1(v5: i32, v6: i32x16, v7: i32x16, v14: i32x16):
+    ;; Loop body - use both iota_vec (v6) and all_ones_mask (v7)
+    v8 = icmp_imm slt v5, 4
+    brif v8, block2, block3
+
+block2:
+    ;; Partial batch - create validity mask from iota_vec
+    v9 = splat.i32x16 v5  ; broadcast loop counter
+    v10 = icmp slt v6, v9  ; compare iota_vec with counter
+    v11 = band v10, v7     ; apply all_ones_mask
+    ;; Accumulate the masked result
+    v15 = iadd v14, v11
+    v12 = iconst.i32 1
+    v13 = iadd.i32 v5, v12
+    jump block1(v13, v6, v7, v15)
+
+block3:
+    ;; Return accumulated result - this uses all the values
+    return v14
+}
+
+;; Integer Division and Remainder for 512-bit vectors
+;; Note: AVX-512 doesn't have native integer division, so these are implemented
+;; using float conversion (with care for precision) or scalar fallback
+
+function %sdiv_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = sdiv v0, v1
+    return v2
+}
+
+function %srem_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = srem v0, v1
+    return v2
+}

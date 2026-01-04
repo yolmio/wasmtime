@@ -130,7 +130,7 @@ macro_rules! isle_common_prelude_methods {
 
         #[inline]
         fn i64_sextend_u64(&mut self, ty: Type, x: u64) -> i64 {
-            let shift_amt = core::cmp::max(0, 64 - ty.bits());
+            let shift_amt = std::cmp::max(0, 64 - ty.bits());
             ((x as i64) << shift_amt) >> shift_amt
         }
 
@@ -167,7 +167,7 @@ macro_rules! isle_common_prelude_methods {
 
         #[inline]
         fn ty_bits(&mut self, ty: Type) -> u8 {
-            use core::convert::TryInto;
+            use std::convert::TryInto;
             ty.bits().try_into().unwrap()
         }
 
@@ -724,6 +724,17 @@ macro_rules! isle_common_prelude_methods {
         #[inline]
         fn pack_value_array_3(&mut self, a: Value, b: Value, c: Value) -> ValueArray3 {
             [a, b, c]
+        }
+
+        #[inline]
+        fn unpack_value_array_4(&mut self, arr: &ValueArray4) -> (Value, Value, Value, Value) {
+            let [a, b, c, d] = *arr;
+            (a, b, c, d)
+        }
+
+        #[inline]
+        fn pack_value_array_4(&mut self, a: Value, b: Value, c: Value, d: Value) -> ValueArray4 {
+            [a, b, c, d]
         }
 
         #[inline]

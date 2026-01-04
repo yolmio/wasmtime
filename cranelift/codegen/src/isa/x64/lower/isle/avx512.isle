@@ -1,0 +1,2181 @@
+;; AVX-512 lowering rules.
+;;
+;; This file contains ISLE lowering patterns for AVX-512 instructions.
+;; These rules match 512-bit vector types (I64X8, I32X16, etc.) and emit
+;; native AVX-512 instructions when the appropriate feature flags are enabled.
+;;
+;; NOTE: We use priority 17 to ensure these rules take precedence over
+;; general vector rules which typically use priority 0-16.
+
+;; =============================================================================
+;; 512-bit Integer Add (iadd)
+;; =============================================================================
+
+;; I64X8 (8 x 64-bit) -> VPADDQ
+(rule 17 (lower (has_type (multi_lane 64 8) (iadd x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpaddq x y))
+
+;; I32X16 (16 x 32-bit) -> VPADDD
+(rule 17 (lower (has_type (multi_lane 32 16) (iadd x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpaddd x y))
+
+;; =============================================================================
+;; 512-bit Integer Subtract (isub)
+;; =============================================================================
+
+;; I64X8 -> VPSUBQ
+(rule 17 (lower (has_type (multi_lane 64 8) (isub x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsubq x y))
+
+;; I32X16 -> VPSUBD
+(rule 17 (lower (has_type (multi_lane 32 16) (isub x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsubd x y))
+
+;; =============================================================================
+;; 512-bit Integer Negate (ineg)
+;; ineg(x) = 0 - x = vpsubd/vpsubq(zero, x)
+;; =============================================================================
+
+;; I64X8 -> VPSUBQ with zero
+(rule 17 (lower (has_type (multi_lane 64 8) (ineg x)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsubq (x64_512_zmm_zero_q) x))
+
+;; I32X16 -> VPSUBD with zero
+(rule 17 (lower (has_type (multi_lane 32 16) (ineg x)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsubd (x64_512_zmm_zero_d) x))
+
+;; =============================================================================
+;; 512-bit Integer Multiply (imul)
+;; =============================================================================
+
+;; I64X8 -> VPMULLQ (requires AVX-512DQ)
+(rule 17 (lower (has_type (multi_lane 64 8) (imul x y)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (x64_512_vpmullq x y))
+
+;; I32X16 -> VPMULLD
+(rule 17 (lower (has_type (multi_lane 32 16) (imul x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpmulld x y))
+
+;; =============================================================================
+;; 512-bit Signed Integer Division (sdiv) - via f64 conversion
+;; AVX-512 doesn't have native integer division. We use f64 (52-bit mantissa)
+;; which can exactly represent all 32-bit integers, ensuring correct results.
+;; Process: split into two i32x8 halves, sign-extend to i64x8, convert to f64x8,
+;; divide, convert back with truncation, truncate to i32x8, recombine.
+;; =============================================================================
+
+;; I32X16 -> split, widen to i64, convert to f64, divide, convert back, narrow, recombine
+(rule 17 (lower (has_type (multi_lane 32 16) (sdiv x y)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (let (
+            ;; Extract low and high halves of dividend (x)
+            (x_lo Xmm (x64_512_vextracti32x8 x 0))
+            (x_hi Xmm (x64_512_vextracti32x8 x 1))
+            ;; Extract low and high halves of divisor (y)
+            (y_lo Xmm (x64_512_vextracti32x8 y 0))
+            (y_hi Xmm (x64_512_vextracti32x8 y 1))
+            ;; Sign-extend i32x8 to i64x8
+            (x_lo_i64 Xmm (x64_512_vpmovsxdq (RegMem.Reg x_lo)))
+            (x_hi_i64 Xmm (x64_512_vpmovsxdq (RegMem.Reg x_hi)))
+            (y_lo_i64 Xmm (x64_512_vpmovsxdq (RegMem.Reg y_lo)))
+            (y_hi_i64 Xmm (x64_512_vpmovsxdq (RegMem.Reg y_hi)))
+            ;; Convert i64x8 to f64x8
+            (x_lo_f64 Xmm (x64_512_vcvtqq2pd (RegMem.Reg x_lo_i64)))
+            (x_hi_f64 Xmm (x64_512_vcvtqq2pd (RegMem.Reg x_hi_i64)))
+            (y_lo_f64 Xmm (x64_512_vcvtqq2pd (RegMem.Reg y_lo_i64)))
+            (y_hi_f64 Xmm (x64_512_vcvtqq2pd (RegMem.Reg y_hi_i64)))
+            ;; Divide as f64x8
+            (q_lo_f64 Xmm (x64_512_vdivpd x_lo_f64 (RegMem.Reg y_lo_f64)))
+            (q_hi_f64 Xmm (x64_512_vdivpd x_hi_f64 (RegMem.Reg y_hi_f64)))
+            ;; Convert back to i64x8 with truncation toward zero
+            (q_lo_i64 Xmm (x64_512_vcvttpd2qq (RegMem.Reg q_lo_f64)))
+            (q_hi_i64 Xmm (x64_512_vcvttpd2qq (RegMem.Reg q_hi_f64)))
+            ;; Truncate i64x8 to i32x8
+            (q_lo_i32 Xmm (x64_512_vpmovqd q_lo_i64))
+            (q_hi_i32 Xmm (x64_512_vpmovqd q_hi_i64))
+            ;; Combine into i32x16: insert low as base, then insert high at lane 1
+            (result Xmm (x64_512_vinserti32x8 (x64_512_vinserti32x8 (x64_512_zmm_zero_d) (RegMem.Reg q_lo_i32) 0) (RegMem.Reg q_hi_i32) 1))
+           )
+        result))
+
+;; =============================================================================
+;; 512-bit Signed Integer Remainder (srem) - a - (a / b) * b
+;; Uses the same f64 approach for division, then computes remainder.
+;; =============================================================================
+
+;; I32X16: srem = a - (sdiv(a, b) * b)
+(rule 17 (lower (has_type (multi_lane 32 16) (srem x y)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (let (
+            ;; Extract low and high halves of dividend (x)
+            (x_lo Xmm (x64_512_vextracti32x8 x 0))
+            (x_hi Xmm (x64_512_vextracti32x8 x 1))
+            ;; Extract low and high halves of divisor (y)
+            (y_lo Xmm (x64_512_vextracti32x8 y 0))
+            (y_hi Xmm (x64_512_vextracti32x8 y 1))
+            ;; Sign-extend i32x8 to i64x8
+            (x_lo_i64 Xmm (x64_512_vpmovsxdq (RegMem.Reg x_lo)))
+            (x_hi_i64 Xmm (x64_512_vpmovsxdq (RegMem.Reg x_hi)))
+            (y_lo_i64 Xmm (x64_512_vpmovsxdq (RegMem.Reg y_lo)))
+            (y_hi_i64 Xmm (x64_512_vpmovsxdq (RegMem.Reg y_hi)))
+            ;; Convert i64x8 to f64x8
+            (x_lo_f64 Xmm (x64_512_vcvtqq2pd (RegMem.Reg x_lo_i64)))
+            (x_hi_f64 Xmm (x64_512_vcvtqq2pd (RegMem.Reg x_hi_i64)))
+            (y_lo_f64 Xmm (x64_512_vcvtqq2pd (RegMem.Reg y_lo_i64)))
+            (y_hi_f64 Xmm (x64_512_vcvtqq2pd (RegMem.Reg y_hi_i64)))
+            ;; Divide as f64x8
+            (q_lo_f64 Xmm (x64_512_vdivpd x_lo_f64 (RegMem.Reg y_lo_f64)))
+            (q_hi_f64 Xmm (x64_512_vdivpd x_hi_f64 (RegMem.Reg y_hi_f64)))
+            ;; Convert back to i64x8 with truncation toward zero
+            (q_lo_i64 Xmm (x64_512_vcvttpd2qq (RegMem.Reg q_lo_f64)))
+            (q_hi_i64 Xmm (x64_512_vcvttpd2qq (RegMem.Reg q_hi_f64)))
+            ;; Truncate i64x8 to i32x8
+            (q_lo_i32 Xmm (x64_512_vpmovqd q_lo_i64))
+            (q_hi_i32 Xmm (x64_512_vpmovqd q_hi_i64))
+            ;; Combine quotient into i32x16
+            (quot Xmm (x64_512_vinserti32x8 (x64_512_vinserti32x8 (x64_512_zmm_zero_d) (RegMem.Reg q_lo_i32) 0) (RegMem.Reg q_hi_i32) 1))
+            ;; Compute remainder: a - quot * b
+            (qb Xmm (x64_512_vpmulld quot y))
+            (rem Xmm (x64_512_vpsubd x qb))
+           )
+        rem))
+
+;; =============================================================================
+;; 512-bit Bitwise AND (band)
+;; =============================================================================
+
+;; I64X8 -> VPANDQ
+(rule 17 (lower (has_type (multi_lane 64 8) (band x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpandq x y))
+
+;; I16X32 -> VPANDD (bitwise)
+(rule 17 (lower (has_type (multi_lane 16 32) (band x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpandd x y))
+
+;; I8X64 -> VPANDD (bitwise)
+(rule 17 (lower (has_type (multi_lane 8 64) (band x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpandd x y))
+
+;; I32X16 -> VPANDD
+(rule 17 (lower (has_type (multi_lane 32 16) (band x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpandd x y))
+
+;; =============================================================================
+;; 512-bit Bitwise OR (bor)
+;; =============================================================================
+
+;; I64X8 -> VPORQ
+(rule 17 (lower (has_type (multi_lane 64 8) (bor x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vporq x y))
+
+;; I16X32 -> VPORD (bitwise)
+(rule 17 (lower (has_type (multi_lane 16 32) (bor x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpord x y))
+
+;; I8X64 -> VPORD (bitwise)
+(rule 17 (lower (has_type (multi_lane 8 64) (bor x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpord x y))
+
+;; I32X16 -> VPORD
+(rule 17 (lower (has_type (multi_lane 32 16) (bor x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpord x y))
+
+;; =============================================================================
+;; 512-bit Bitwise XOR (bxor)
+;; =============================================================================
+
+;; I64X8 -> VPXORQ
+(rule 17 (lower (has_type (multi_lane 64 8) (bxor x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpxorq x y))
+
+;; I16X32 -> VPXORD (bitwise)
+(rule 17 (lower (has_type (multi_lane 16 32) (bxor x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpxord x y))
+
+;; I8X64 -> VPXORD (bitwise)
+(rule 17 (lower (has_type (multi_lane 8 64) (bxor x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpxord x y))
+
+;; I32X16 -> VPXORD
+(rule 17 (lower (has_type (multi_lane 32 16) (bxor x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpxord x y))
+
+;; =============================================================================
+;; 512-bit Bitwise NOT (bnot) - XOR with all-ones
+;; =============================================================================
+
+;; I64X8 -> VPXORQ with all-ones
+(rule 17 (lower (has_type (multi_lane 64 8) (bnot x)))
+      (if-let true (has_avx512f))
+      (x64_512_vpxorq x (x64_512_all_ones_64)))
+
+;; I16X32 -> VPXORD with all-ones
+(rule 17 (lower (has_type (multi_lane 16 32) (bnot x)))
+      (if-let true (has_avx512f))
+      (x64_512_vpxord x (x64_512_all_ones_32)))
+
+;; I8X64 -> VPXORD with all-ones
+(rule 17 (lower (has_type (multi_lane 8 64) (bnot x)))
+      (if-let true (has_avx512f))
+      (x64_512_vpxord x (x64_512_all_ones_32)))
+
+;; I32X16 -> VPXORD with all-ones
+(rule 17 (lower (has_type (multi_lane 32 16) (bnot x)))
+      (if-let true (has_avx512f))
+      (x64_512_vpxord x (x64_512_all_ones_32)))
+
+;; =============================================================================
+;; 512-bit Signed Minimum (smin)
+;; =============================================================================
+
+;; I64X8 -> VPMINSQ
+(rule 17 (lower (has_type (multi_lane 64 8) (smin x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpminsq x y))
+
+;; I32X16 -> VPMINSD
+(rule 17 (lower (has_type (multi_lane 32 16) (smin x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpminsd x y))
+
+;; =============================================================================
+;; 512-bit Signed Maximum (smax)
+;; =============================================================================
+
+;; I64X8 -> VPMAXSQ
+(rule 17 (lower (has_type (multi_lane 64 8) (smax x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpmaxsq x y))
+
+;; I32X16 -> VPMAXSD
+(rule 17 (lower (has_type (multi_lane 32 16) (smax x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpmaxsd x y))
+
+;; =============================================================================
+;; 512-bit Unsigned Minimum (umin)
+;; =============================================================================
+
+;; I64X8 -> VPMINUQ
+(rule 17 (lower (has_type (multi_lane 64 8) (umin x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpminuq x y))
+
+;; I32X16 -> VPMINUD
+(rule 17 (lower (has_type (multi_lane 32 16) (umin x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpminud x y))
+
+;; =============================================================================
+;; 512-bit Unsigned Maximum (umax)
+;; =============================================================================
+
+;; I64X8 -> VPMAXUQ
+(rule 17 (lower (has_type (multi_lane 64 8) (umax x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpmaxuq x y))
+
+;; I32X16 -> VPMAXUD
+(rule 17 (lower (has_type (multi_lane 32 16) (umax x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpmaxud x y))
+
+;; =============================================================================
+;; 512-bit Load
+;; =============================================================================
+
+;; I64X8 load -> VMOVDQU64
+(rule 17 (lower (has_type (multi_lane 64 8) (load flags address offset)))
+      (if-let true (has_avx512f))
+      (x64_512_load_i64x8 (to_amode flags address offset)))
+
+;; I32X16 load -> VMOVDQU32
+(rule 17 (lower (has_type (multi_lane 32 16) (load flags address offset)))
+      (if-let true (has_avx512f))
+      (x64_512_load_i32x16 (to_amode flags address offset)))
+
+;; =============================================================================
+;; 512-bit Store
+;; =============================================================================
+
+;; I64X8 store -> VMOVDQU64
+(rule 17 (lower (store flags value @ (value_type (multi_lane 64 8)) address offset))
+      (if-let true (has_avx512f))
+      (side_effect (x64_512_store_i64x8 (to_amode flags address offset) value)))
+
+;; I32X16 store -> VMOVDQU32
+(rule 17 (lower (store flags value @ (value_type (multi_lane 32 16)) address offset))
+      (if-let true (has_avx512f))
+      (side_effect (x64_512_store_i32x16 (to_amode flags address offset) value)))
+
+;; I8X64 load -> VMOVDQU8 (requires AVX-512BW)
+(rule 17 (lower (has_type (multi_lane 8 64) (load flags address offset)))
+      (if-let true (has_avx512bw))
+      (x64_512_load_i8x64 (to_amode flags address offset)))
+
+;; I16X32 load -> VMOVDQU16 (requires AVX-512BW)
+(rule 17 (lower (has_type (multi_lane 16 32) (load flags address offset)))
+      (if-let true (has_avx512bw))
+      (x64_512_load_i16x32 (to_amode flags address offset)))
+
+;; I8X64 store -> VMOVDQU8 (requires AVX-512BW)
+(rule 17 (lower (store flags value @ (value_type (multi_lane 8 64)) address offset))
+      (if-let true (has_avx512bw))
+      (side_effect (x64_512_store_i8x64 (to_amode flags address offset) value)))
+
+;; I16X32 store -> VMOVDQU16 (requires AVX-512BW)
+(rule 17 (lower (store flags value @ (value_type (multi_lane 16 32)) address offset))
+      (if-let true (has_avx512bw))
+      (side_effect (x64_512_store_i16x32 (to_amode flags address offset) value)))
+
+;; =============================================================================
+;; 256-bit Load
+;; =============================================================================
+
+;; I32X8 load -> VMOVDQU32 (256-bit)
+(rule 17 (lower (has_type (multi_lane 32 8) (load flags address offset)))
+      (if-let true (has_avx512f))
+      (x64_256_load_i32x8 (to_amode flags address offset)))
+
+;; I64X4 load -> VMOVDQU64 (256-bit)
+(rule 17 (lower (has_type (multi_lane 64 4) (load flags address offset)))
+      (if-let true (has_avx512f))
+      (x64_256_load_i64x4 (to_amode flags address offset)))
+
+;; =============================================================================
+;; 256-bit Store
+;; =============================================================================
+
+;; I32X8 store -> VMOVDQU32 (256-bit)
+(rule 17 (lower (store flags value @ (value_type (multi_lane 32 8)) address offset))
+      (if-let true (has_avx512f))
+      (side_effect (x64_256_store_i32x8 (to_amode flags address offset) value)))
+
+;; I64X4 store -> VMOVDQU64 (256-bit)
+(rule 17 (lower (store flags value @ (value_type (multi_lane 64 4)) address offset))
+      (if-let true (has_avx512f))
+      (side_effect (x64_256_store_i64x4 (to_amode flags address offset) value)))
+
+;; =============================================================================
+;; AVX-512 Compress (x86_simd_compress)
+;; =============================================================================
+;;
+;; VPCOMPRESSD/Q - Compress vector elements based on mask.
+;; Elements where mask bit is 1 are packed contiguously starting from element 0.
+;;
+;; Note: The IR mask is a vector of 0/-1 values. We use VPMOVD2M to convert
+;; the high bit of each element to a k-register mask.
+
+;; I32X16 compress -> VPCOMPRESSD
+(rule 17 (lower (has_type (multi_lane 32 16) (x86_simd_compress mask value)))
+      (if-let true (has_avx512f))
+      (x64_512_vpcompressd_reg (put_in_reg mask) value))
+
+;; I64X8 compress -> VPCOMPRESSQ
+(rule 17 (lower (has_type (multi_lane 64 8) (x86_simd_compress mask value)))
+      (if-let true (has_avx512f))
+      (x64_512_vpcompressq_reg (put_in_reg mask) value))
+
+;; =============================================================================
+;; AVX-512 Expand (x86_simd_expand)
+;; =============================================================================
+;;
+;; VPEXPANDD/Q - Expand compressed elements based on mask.
+;; Elements are placed at positions where mask bit is 1.
+
+;; I32X16 expand -> VPEXPANDD
+(rule 17 (lower (has_type (multi_lane 32 16) (x86_simd_expand mask value)))
+      (if-let true (has_avx512f))
+      (x64_512_vpexpandd_reg (put_in_reg mask) value))
+
+;; I64X8 expand -> VPEXPANDQ
+(rule 17 (lower (has_type (multi_lane 64 8) (x86_simd_expand mask value)))
+      (if-let true (has_avx512f))
+      (x64_512_vpexpandq_reg (put_in_reg mask) value))
+
+;; =============================================================================
+;; AVX-512 Masked Load (x86_simd_masked_load)
+;; =============================================================================
+;;
+;; VMOVDQU32/64 with mask - load with element-wise masking.
+;; Elements where mask bit is 0 get the passthru value.
+
+;; I32X16 masked load -> VMOVDQU32 with mask
+(rule 17 (lower (has_type (multi_lane 32 16) (x86_simd_masked_load flags mask passthru base offset)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_load_i32x16 (to_amode flags base offset) (put_in_reg mask) passthru))
+
+;; I64X8 masked load -> VMOVDQU64 with mask
+(rule 17 (lower (has_type (multi_lane 64 8) (x86_simd_masked_load flags mask passthru base offset)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_load_i64x8 (to_amode flags base offset) (put_in_reg mask) passthru))
+
+;; =============================================================================
+;; AVX-512 Masked Store (x86_simd_masked_store)
+;; =============================================================================
+;;
+;; VMOVDQU32/64 with mask - store with element-wise masking.
+;; Only elements where mask bit is 1 are stored.
+
+;; I32X16 masked store -> VMOVDQU32 with mask
+(rule 17 (lower (x86_simd_masked_store flags mask value @ (value_type (multi_lane 32 16)) base offset))
+      (if-let true (has_avx512f))
+      (side_effect (x64_512_masked_store_i32x16 (to_amode flags base offset) (put_in_reg mask) value)))
+
+;; I64X8 masked store -> VMOVDQU64 with mask
+(rule 17 (lower (x86_simd_masked_store flags mask value @ (value_type (multi_lane 64 8)) base offset))
+      (if-let true (has_avx512f))
+      (side_effect (x64_512_masked_store_i64x8 (to_amode flags base offset) (put_in_reg mask) value)))
+
+;; =============================================================================
+;; AVX-512 Gather (x86_simd_gather)
+;; =============================================================================
+;;
+;; VPGATHERDD/DQ/QD/QQ - gather load from non-contiguous memory.
+;; Loads elements from base + indices * scale + offset.
+;;
+;; NOTE: The IR gather operation gathers ALL elements (no mask parameter).
+;; We initialize an all-1s mask using KXNORW k1, k1, k1.
+
+;; I32X16 with I32X16 indices (32-bit elements, 32-bit indices) -> VPGATHERDD
+(rule 17 (lower (has_type (multi_lane 32 16) (x86_simd_gather flags base indices @ (value_type (multi_lane 32 16)) scale offset)))
+      (if-let true (has_avx512f))
+      (let ((mask Reg (x64_512_init_all_ones_mask))
+            (scale_val u8 (uimm8_value scale))
+            (disp i32 (i32_from_offset32 offset)))
+        (x64_512_vpgatherdd (put_in_reg base) (put_in_xmm indices) scale_val disp mask)))
+
+;; I64X8 with I32X8 indices (64-bit elements, 32-bit indices) -> VPGATHERDQ
+(rule 17 (lower (has_type (multi_lane 64 8) (x86_simd_gather flags base indices @ (value_type (multi_lane 32 8)) scale offset)))
+      (if-let true (has_avx512f))
+      (let ((mask Reg (x64_512_init_all_ones_mask))
+            (scale_val u8 (uimm8_value scale))
+            (disp i32 (i32_from_offset32 offset)))
+        (x64_512_vpgatherdq (put_in_reg base) (put_in_xmm indices) scale_val disp mask)))
+
+;; I64X8 with I64X8 indices (64-bit elements, 64-bit indices) -> VPGATHERQQ
+(rule 17 (lower (has_type (multi_lane 64 8) (x86_simd_gather flags base indices @ (value_type (multi_lane 64 8)) scale offset)))
+      (if-let true (has_avx512f))
+      (let ((mask Reg (x64_512_init_all_ones_mask))
+            (scale_val u8 (uimm8_value scale))
+            (disp i32 (i32_from_offset32 offset)))
+        (x64_512_vpgatherqq (put_in_reg base) (put_in_xmm indices) scale_val disp mask)))
+
+;; =============================================================================
+;; AVX-512 Scatter (x86_simd_scatter)
+;; =============================================================================
+;;
+;; VPSCATTERDD/DQ/QD/QQ - scatter store to non-contiguous memory.
+;; Stores elements to base + indices * scale + offset.
+;;
+;; The IR scatter has a mask parameter which is a vector of 0/-1 values.
+;; We convert it to a k-register mask using VPMOVD2M.
+
+;; I32X16 with I32X16 indices (32-bit elements, 32-bit indices) -> VPSCATTERDD
+(rule 17 (lower (x86_simd_scatter flags mask value @ (value_type (multi_lane 32 16)) base indices @ (value_type (multi_lane 32 16)) scale offset))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask)))
+            (scale_val u8 (uimm8_value scale))
+            (disp i32 (i32_from_offset32 offset)))
+        (side_effect (x64_512_vpscatterdd (put_in_reg base) (put_in_xmm indices) scale_val disp (put_in_xmm value) kreg))))
+
+;; I64X8 with I32X8 indices (64-bit elements, 32-bit indices) -> VPSCATTERDQ
+(rule 17 (lower (x86_simd_scatter flags mask value @ (value_type (multi_lane 64 8)) base indices @ (value_type (multi_lane 32 8)) scale offset))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask)))
+            (scale_val u8 (uimm8_value scale))
+            (disp i32 (i32_from_offset32 offset)))
+        (side_effect (x64_512_vpscatterdq (put_in_reg base) (put_in_xmm indices) scale_val disp (put_in_xmm value) kreg))))
+
+;; I64X8 with I64X8 indices (64-bit elements, 64-bit indices) -> VPSCATTERQQ
+(rule 17 (lower (x86_simd_scatter flags mask value @ (value_type (multi_lane 64 8)) base indices @ (value_type (multi_lane 64 8)) scale offset))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask)))
+            (scale_val u8 (uimm8_value scale))
+            (disp i32 (i32_from_offset32 offset)))
+        (side_effect (x64_512_vpscatterqq (put_in_reg base) (put_in_xmm indices) scale_val disp (put_in_xmm value) kreg))))
+
+;; =============================================================================
+;; 512-bit Integer Comparison (icmp)
+;; =============================================================================
+;;
+;; AVX-512 comparisons use VPCMPD/VPCMPQ which produce a k-register mask.
+;; We then convert the k-register to a vector mask (0/-1 per element) using
+;; VPMOVM2D/VPMOVM2Q to match the expected IR semantics.
+;;
+;; The flow is: icmp -> VPCMPD/Q -> k-register -> VPMOVM2D/Q -> vector mask
+
+;; I32X16 Equal
+(rule 17 (lower (icmp (IntCC.Equal) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpeqd (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; I32X16 Not Equal
+(rule 17 (lower (icmp (IntCC.NotEqual) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpneqd (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; I32X16 Signed Greater Than
+(rule 17 (lower (icmp (IntCC.SignedGreaterThan) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpgtd (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; I32X16 Signed Less Than
+(rule 17 (lower (icmp (IntCC.SignedLessThan) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpltd (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; I32X16 Signed Greater Than Or Equal
+(rule 17 (lower (icmp (IntCC.SignedGreaterThanOrEqual) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpged (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; I32X16 Signed Less Than Or Equal
+(rule 17 (lower (icmp (IntCC.SignedLessThanOrEqual) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpled (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; I64X8 Equal
+(rule 17 (lower (icmp (IntCC.Equal) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpeqq (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; I64X8 Not Equal
+(rule 17 (lower (icmp (IntCC.NotEqual) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpneqq (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; I64X8 Signed Greater Than
+(rule 17 (lower (icmp (IntCC.SignedGreaterThan) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpgtq (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; I64X8 Signed Less Than
+(rule 17 (lower (icmp (IntCC.SignedLessThan) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpltq (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; I64X8 Signed Greater Than Or Equal
+(rule 17 (lower (icmp (IntCC.SignedGreaterThanOrEqual) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpgeq (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; I64X8 Signed Less Than Or Equal
+(rule 17 (lower (icmp (IntCC.SignedLessThanOrEqual) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpleq (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; =============================================================================
+;; 512-bit Unsigned Integer Comparison (icmp unsigned)
+;; =============================================================================
+;;
+;; AVX-512 unsigned comparisons use VPCMPUD/VPCMPUQ which produce a k-register mask.
+;; We then convert the k-register to a vector mask (0/-1 per element) using
+;; VPMOVM2D/VPMOVM2Q to match the expected IR semantics.
+
+;; I32X16 Unsigned Greater Than
+(rule 17 (lower (icmp (IntCC.UnsignedGreaterThan) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpugtd (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; I32X16 Unsigned Less Than
+(rule 17 (lower (icmp (IntCC.UnsignedLessThan) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpultd (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; I32X16 Unsigned Greater Than Or Equal
+(rule 17 (lower (icmp (IntCC.UnsignedGreaterThanOrEqual) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpuged (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; I32X16 Unsigned Less Than Or Equal
+(rule 17 (lower (icmp (IntCC.UnsignedLessThanOrEqual) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpuled (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; I64X8 Unsigned Greater Than
+(rule 17 (lower (icmp (IntCC.UnsignedGreaterThan) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpugtq (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; I64X8 Unsigned Less Than
+(rule 17 (lower (icmp (IntCC.UnsignedLessThan) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpultq (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; I64X8 Unsigned Greater Than Or Equal
+(rule 17 (lower (icmp (IntCC.UnsignedGreaterThanOrEqual) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpugeq (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; I64X8 Unsigned Less Than Or Equal
+(rule 17 (lower (icmp (IntCC.UnsignedLessThanOrEqual) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vpcmpuleq (put_in_xmm x) (put_in_xmm_mem y))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; =============================================================================
+;; 512-bit Floating-Point Comparison (fcmp)
+;; =============================================================================
+;;
+;; AVX-512 FP comparisons use VCMPPS/VCMPPD which produce a k-register mask.
+;; We then convert the k-register to a vector mask (0/-1 per element) using
+;; VPMOVM2D/VPMOVM2Q to match the expected IR semantics.
+;;
+;; The flow is: fcmp -> VCMPPS/PD -> k-register -> VPMOVM2D/Q -> vector mask
+
+;; F32X16 Equal
+(rule 17 (lower (fcmp (FloatCC.Equal) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmpps (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.Equal)))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; F32X16 Not Equal
+(rule 17 (lower (fcmp (FloatCC.NotEqual) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmpps (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.NotEqual)))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; F32X16 Less Than
+(rule 17 (lower (fcmp (FloatCC.LessThan) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmpps (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.LessThan)))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; F32X16 Less Than Or Equal
+(rule 17 (lower (fcmp (FloatCC.LessThanOrEqual) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmpps (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.LessThanOrEqual)))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; F32X16 Ordered
+(rule 17 (lower (fcmp (FloatCC.Ordered) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmpps (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.Ordered)))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; F32X16 Unordered
+(rule 17 (lower (fcmp (FloatCC.Unordered) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmpps (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.Unordered)))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; F32X16 Unordered Or Greater Than
+(rule 17 (lower (fcmp (FloatCC.UnorderedOrGreaterThan) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmpps (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.UnorderedOrGreaterThan)))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; F32X16 Unordered Or Greater Than Or Equal
+(rule 17 (lower (fcmp (FloatCC.UnorderedOrGreaterThanOrEqual) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmpps (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.UnorderedOrGreaterThanOrEqual)))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; F32X16 Greater Than (swap operands)
+(rule 17 (lower (fcmp (FloatCC.GreaterThan) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmpps (put_in_xmm y) (put_in_xmm_mem x) (encode_fcmp_imm (FcmpImm.LessThan)))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; F32X16 Greater Than Or Equal (swap operands)
+(rule 17 (lower (fcmp (FloatCC.GreaterThanOrEqual) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmpps (put_in_xmm y) (put_in_xmm_mem x) (encode_fcmp_imm (FcmpImm.LessThanOrEqual)))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; F32X16 Unordered Or Less Than (swap operands)
+(rule 17 (lower (fcmp (FloatCC.UnorderedOrLessThan) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmpps (put_in_xmm y) (put_in_xmm_mem x) (encode_fcmp_imm (FcmpImm.UnorderedOrGreaterThan)))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; F32X16 Unordered Or Less Than Or Equal (swap operands)
+(rule 17 (lower (fcmp (FloatCC.UnorderedOrLessThanOrEqual) x @ (value_type (multi_lane 32 16)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmpps (put_in_xmm y) (put_in_xmm_mem x) (encode_fcmp_imm (FcmpImm.UnorderedOrGreaterThanOrEqual)))))
+        (x64_512_kreg_to_vec_mask_32 kreg)))
+
+;; F64X8 Equal
+(rule 17 (lower (fcmp (FloatCC.Equal) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmppd (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.Equal)))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; F64X8 Not Equal
+(rule 17 (lower (fcmp (FloatCC.NotEqual) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmppd (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.NotEqual)))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; F64X8 Less Than
+(rule 17 (lower (fcmp (FloatCC.LessThan) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmppd (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.LessThan)))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; F64X8 Less Than Or Equal
+(rule 17 (lower (fcmp (FloatCC.LessThanOrEqual) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmppd (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.LessThanOrEqual)))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; F64X8 Ordered
+(rule 17 (lower (fcmp (FloatCC.Ordered) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmppd (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.Ordered)))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; F64X8 Unordered
+(rule 17 (lower (fcmp (FloatCC.Unordered) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmppd (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.Unordered)))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; F64X8 Unordered Or Greater Than
+(rule 17 (lower (fcmp (FloatCC.UnorderedOrGreaterThan) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmppd (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.UnorderedOrGreaterThan)))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; F64X8 Unordered Or Greater Than Or Equal
+(rule 17 (lower (fcmp (FloatCC.UnorderedOrGreaterThanOrEqual) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmppd (put_in_xmm x) (put_in_xmm_mem y) (encode_fcmp_imm (FcmpImm.UnorderedOrGreaterThanOrEqual)))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; F64X8 Greater Than (swap operands)
+(rule 17 (lower (fcmp (FloatCC.GreaterThan) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmppd (put_in_xmm y) (put_in_xmm_mem x) (encode_fcmp_imm (FcmpImm.LessThan)))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; F64X8 Greater Than Or Equal (swap operands)
+(rule 17 (lower (fcmp (FloatCC.GreaterThanOrEqual) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmppd (put_in_xmm y) (put_in_xmm_mem x) (encode_fcmp_imm (FcmpImm.LessThanOrEqual)))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; F64X8 Unordered Or Less Than (swap operands)
+(rule 17 (lower (fcmp (FloatCC.UnorderedOrLessThan) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmppd (put_in_xmm y) (put_in_xmm_mem x) (encode_fcmp_imm (FcmpImm.UnorderedOrGreaterThan)))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; F64X8 Unordered Or Less Than Or Equal (swap operands)
+(rule 17 (lower (fcmp (FloatCC.UnorderedOrLessThanOrEqual) x @ (value_type (multi_lane 64 8)) y))
+      (if-let true (has_avx512f))
+      (let ((kreg Reg (x64_512_vcmppd (put_in_xmm y) (put_in_xmm_mem x) (encode_fcmp_imm (FcmpImm.UnorderedOrGreaterThanOrEqual)))))
+        (x64_512_kreg_to_vec_mask_64 kreg)))
+
+;; =============================================================================
+;; 512-bit Splat/Broadcast (splat)
+;; =============================================================================
+;;
+;; Broadcast a scalar value to all lanes of a 512-bit vector.
+;; Uses VPBROADCASTD (32-bit) or VPBROADCASTQ (64-bit).
+
+;; I32X16 splat from GPR -> VPBROADCASTD
+(rule 17 (lower (has_type (multi_lane 32 16) (splat src)))
+      (if-let true (has_avx512f))
+      (x64_512_vpbroadcastd (RegMem.Reg (bitcast_gpr_to_xmm 32 src))))
+
+;; I64X8 splat from GPR -> VPBROADCASTQ
+(rule 17 (lower (has_type (multi_lane 64 8) (splat src)))
+      (if-let true (has_avx512f))
+      (x64_512_vpbroadcastq (RegMem.Reg (bitcast_gpr_to_xmm 64 src))))
+
+;; =============================================================================
+;; 512-bit Floating-Point Add (fadd)
+;; =============================================================================
+
+;; F32X16 -> VADDPS
+(rule 17 (lower (has_type (multi_lane 32 16) (fadd x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vaddps (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; F64X8 -> VADDPD
+(rule 17 (lower (has_type (multi_lane 64 8) (fadd x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vaddpd (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; =============================================================================
+;; 512-bit Floating-Point Subtract (fsub)
+;; =============================================================================
+
+;; F32X16 -> VSUBPS
+(rule 17 (lower (has_type (multi_lane 32 16) (fsub x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vsubps (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; F64X8 -> VSUBPD
+(rule 17 (lower (has_type (multi_lane 64 8) (fsub x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vsubpd (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; =============================================================================
+;; 512-bit Floating-Point Multiply (fmul)
+;; =============================================================================
+
+;; F32X16 -> VMULPS
+(rule 17 (lower (has_type (multi_lane 32 16) (fmul x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vmulps (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; F64X8 -> VMULPD
+(rule 17 (lower (has_type (multi_lane 64 8) (fmul x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vmulpd (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; =============================================================================
+;; 512-bit Floating-Point Divide (fdiv)
+;; =============================================================================
+
+;; F32X16 -> VDIVPS
+(rule 17 (lower (has_type (multi_lane 32 16) (fdiv x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vdivps (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; F64X8 -> VDIVPD
+(rule 17 (lower (has_type (multi_lane 64 8) (fdiv x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vdivpd (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; =============================================================================
+;; 512-bit Floating-Point Minimum (fmin)
+;; =============================================================================
+
+;; F32X16 -> VMINPS
+(rule 17 (lower (has_type (multi_lane 32 16) (fmin x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vminps (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; F64X8 -> VMINPD
+(rule 17 (lower (has_type (multi_lane 64 8) (fmin x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vminpd (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; =============================================================================
+;; 512-bit Floating-Point Maximum (fmax)
+;; =============================================================================
+
+;; F32X16 -> VMAXPS
+(rule 17 (lower (has_type (multi_lane 32 16) (fmax x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vmaxps (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; F64X8 -> VMAXPD
+(rule 17 (lower (has_type (multi_lane 64 8) (fmax x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vmaxpd (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; =============================================================================
+;; 512-bit Floating-Point Square Root (sqrt)
+;; =============================================================================
+
+;; F32X16 -> VSQRTPS
+(rule 17 (lower (has_type (multi_lane 32 16) (sqrt x)))
+      (if-let true (has_avx512f))
+      (x64_512_vsqrtps (put_in_xmm_mem x)))
+
+;; F64X8 -> VSQRTPD
+(rule 17 (lower (has_type (multi_lane 64 8) (sqrt x)))
+      (if-let true (has_avx512f))
+      (x64_512_vsqrtpd (put_in_xmm_mem x)))
+
+;; =============================================================================
+;; 512-bit Floating-Point Fused Multiply-Add (fma)
+;; =============================================================================
+
+;; F32X16 -> VFMADD213PS
+;; fma(x, y, z) = x * y + z
+(rule 17 (lower (has_type (multi_lane 32 16) (fma x y z)))
+      (if-let true (has_avx512f))
+      (x64_512_vfmadd213ps (put_in_xmm x) (put_in_xmm y) (put_in_xmm_mem z)))
+
+;; F64X8 -> VFMADD213PD
+;; fma(x, y, z) = x * y + z
+(rule 17 (lower (has_type (multi_lane 64 8) (fma x y z)))
+      (if-let true (has_avx512f))
+      (x64_512_vfmadd213pd (put_in_xmm x) (put_in_xmm y) (put_in_xmm_mem z)))
+
+;; =============================================================================
+;; FMA Fusion Patterns: fsub(fmul(x, y), z) -> VFMSUB
+;; =============================================================================
+
+;; F32X16: fsub(fmul(x, y), z) = x*y - z -> VFMSUB213PS
+;; Higher priority (21) to match before plain fsub
+(rule 21 (lower (has_type (multi_lane 32 16) (fsub (fmul x y) z)))
+      (if-let true (has_avx512f))
+      (x64_512_vfmsub213ps (put_in_xmm x) (put_in_xmm y) (put_in_xmm_mem z)))
+
+;; F64X8: fsub(fmul(x, y), z) = x*y - z -> VFMSUB213PD
+(rule 21 (lower (has_type (multi_lane 64 8) (fsub (fmul x y) z)))
+      (if-let true (has_avx512f))
+      (x64_512_vfmsub213pd (put_in_xmm x) (put_in_xmm y) (put_in_xmm_mem z)))
+
+;; =============================================================================
+;; FMA Fusion Patterns: fsub(z, fmul(x, y)) -> VFNMADD
+;; =============================================================================
+
+;; F32X16: fsub(z, fmul(x, y)) = z - x*y = -(x*y) + z -> VFNMADD213PS
+;; Lower priority (22) than VFMSUB (21) to prefer VFMSUB when both could match
+(rule 22 (lower (has_type (multi_lane 32 16) (fsub z (fmul x y))))
+      (if-let true (has_avx512f))
+      (x64_512_vfnmadd213ps (put_in_xmm x) (put_in_xmm y) (put_in_xmm_mem z)))
+
+;; F64X8: fsub(z, fmul(x, y)) = z - x*y = -(x*y) + z -> VFNMADD213PD
+(rule 22 (lower (has_type (multi_lane 64 8) (fsub z (fmul x y))))
+      (if-let true (has_avx512f))
+      (x64_512_vfnmadd213pd (put_in_xmm x) (put_in_xmm y) (put_in_xmm_mem z)))
+
+;; =============================================================================
+;; 512-bit Permutation / Swizzle (VPERMD/Q)
+;; =============================================================================
+
+;; I32X16 swizzle -> VPERMD
+;; swizzle(data, indices) = data[indices[i]] for each lane i
+(rule 17 (lower (has_type (multi_lane 32 16) (swizzle data indices)))
+      (if-let true (has_avx512f))
+      (x64_512_vpermd (put_in_xmm indices) (put_in_xmm_mem data)))
+
+;; I64X8 swizzle -> VPERMQ
+;; swizzle(data, indices) = data[indices[i]] for each lane i
+(rule 17 (lower (has_type (multi_lane 64 8) (swizzle data indices)))
+      (if-let true (has_avx512f))
+      (x64_512_vpermq (put_in_xmm indices) (put_in_xmm_mem data)))
+
+;; =============================================================================
+;; 512-bit Variable Shift (VPSLLV, VPSRLV, VPSRAV)
+;; =============================================================================
+
+;; I32X16 variable left shift -> VPSLLVD
+(rule 17 (lower (has_type (multi_lane 32 16) (ishl data shift)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsllvd (put_in_xmm data) (put_in_xmm_mem shift)))
+
+;; I64X8 variable left shift -> VPSLLVQ
+(rule 17 (lower (has_type (multi_lane 64 8) (ishl data shift)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsllvq (put_in_xmm data) (put_in_xmm_mem shift)))
+
+;; I32X16 variable unsigned right shift -> VPSRLVD
+(rule 17 (lower (has_type (multi_lane 32 16) (ushr data shift)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsrlvd (put_in_xmm data) (put_in_xmm_mem shift)))
+
+;; I64X8 variable unsigned right shift -> VPSRLVQ
+(rule 17 (lower (has_type (multi_lane 64 8) (ushr data shift)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsrlvq (put_in_xmm data) (put_in_xmm_mem shift)))
+
+;; I32X16 variable signed right shift -> VPSRAVD
+(rule 17 (lower (has_type (multi_lane 32 16) (sshr data shift)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsravd (put_in_xmm data) (put_in_xmm_mem shift)))
+
+;; I64X8 variable signed right shift -> VPSRAVQ
+(rule 17 (lower (has_type (multi_lane 64 8) (sshr data shift)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsravq (put_in_xmm data) (put_in_xmm_mem shift)))
+
+;; =============================================================================
+;; 512-bit Rotate Left
+;; =============================================================================
+;; NOTE: CLIF's `rotl` instruction takes a scalar second argument (rotate count),
+;; not a vector. VPROLVD/Q instructions take per-element rotate counts (vector).
+;; To use VPROLVD/Q, we would need a new CLIF instruction for per-element rotate.
+;; For now, rotl.i32x16 and rotl.i64x8 will fall back to the default lowering.
+
+;; =============================================================================
+;; 512-bit Population Count (VPOPCNTD/Q - AVX-512 VPOPCNTDQ)
+;; =============================================================================
+;; NOTE: These instructions require AVX-512 VPOPCNTDQ extension.
+
+;; I32X16 population count -> VPOPCNTD
+(rule 17 (lower (has_type (multi_lane 32 16) (popcnt data)))
+      (if-let true (has_avx512vpopcntdq))
+      (x64_512_vpopcntd (put_in_xmm data)))
+
+;; I64X8 population count -> VPOPCNTQ
+(rule 17 (lower (has_type (multi_lane 64 8) (popcnt data)))
+      (if-let true (has_avx512vpopcntdq))
+      (x64_512_vpopcntq (put_in_xmm data)))
+
+;; =============================================================================
+;; 512-bit Bitselect / Blend (VPBLENDMD/Q)
+;; =============================================================================
+
+;; I32X16 bitselect -> VPMOVD2M + VPBLENDMD
+;; bitselect(cond, if_true, if_false) = cond ? if_true : if_false per element
+;; Note: The blend helper parameter names are inverted from actual behavior.
+;; VPBLENDMD selects src2 when k=1, src1 when k=0.
+;; So we pass (if_false, if_true) to get correct bitselect semantics.
+(rule 17 (lower (has_type (multi_lane 32 16) (bitselect cond if_true if_false)))
+      (if-let true (has_avx512f))
+      (x64_512_vpblendmd (x64_512_vec_mask_to_kreg_32 (put_in_xmm cond))
+                       (put_in_xmm if_false)
+                       (put_in_xmm_mem if_true)))
+
+;; I64X8 bitselect -> VPMOVQ2M + VPBLENDMQ
+(rule 17 (lower (has_type (multi_lane 64 8) (bitselect cond if_true if_false)))
+      (if-let true (has_avx512f))
+      (x64_512_vpblendmq (x64_512_vec_mask_to_kreg_64 (put_in_xmm cond))
+                       (put_in_xmm if_false)
+                       (put_in_xmm_mem if_true)))
+
+;; =============================================================================
+;; 512-bit Count Leading Zeros (VPLZCNTD/Q - AVX-512CD)
+;; =============================================================================
+
+;; I32X16 clz -> VPLZCNTD (requires AVX-512CD)
+(rule 17 (lower (has_type (multi_lane 32 16) (clz data)))
+      (if-let true (has_avx512cd))
+      (x64_512_vplzcntd (put_in_xmm data)))
+
+;; I64X8 clz -> VPLZCNTQ (requires AVX-512CD)
+(rule 17 (lower (has_type (multi_lane 64 8) (clz data)))
+      (if-let true (has_avx512cd))
+      (x64_512_vplzcntq (put_in_xmm data)))
+
+;; =============================================================================
+;; 512-bit Integer Absolute Value (VPABSD/Q)
+;; =============================================================================
+
+;; I32X16 iabs -> VPABSD
+(rule 17 (lower (has_type (multi_lane 32 16) (iabs x)))
+      (if-let true (has_avx512f))
+      (x64_512_vpabsd (put_in_xmm x)))
+
+;; I64X8 iabs -> VPABSQ
+(rule 17 (lower (has_type (multi_lane 64 8) (iabs x)))
+      (if-let true (has_avx512f))
+      (x64_512_vpabsq (put_in_xmm x)))
+
+;; =============================================================================
+;; 512-bit Per-Element Variable Shifts (AVX-512F)
+;; =============================================================================
+
+;; x86_vpsllv on I32X16 -> VPSLLVD
+(rule 17 (lower (has_type (multi_lane 32 16) (x86_vpsllv data shift)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsllvd (put_in_xmm data) (put_in_xmm_mem shift)))
+
+;; x86_vpsllv on I64X8 -> VPSLLVQ
+(rule 17 (lower (has_type (multi_lane 64 8) (x86_vpsllv data shift)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsllvq (put_in_xmm data) (put_in_xmm_mem shift)))
+
+;; x86_vpsrlv on I32X16 -> VPSRLVD
+(rule 17 (lower (has_type (multi_lane 32 16) (x86_vpsrlv data shift)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsrlvd (put_in_xmm data) (put_in_xmm_mem shift)))
+
+;; x86_vpsrlv on I64X8 -> VPSRLVQ
+(rule 17 (lower (has_type (multi_lane 64 8) (x86_vpsrlv data shift)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsrlvq (put_in_xmm data) (put_in_xmm_mem shift)))
+
+;; x86_vpsrav on I32X16 -> VPSRAVD
+(rule 17 (lower (has_type (multi_lane 32 16) (x86_vpsrav data shift)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsravd (put_in_xmm data) (put_in_xmm_mem shift)))
+
+;; x86_vpsrav on I64X8 -> VPSRAVQ
+(rule 17 (lower (has_type (multi_lane 64 8) (x86_vpsrav data shift)))
+      (if-let true (has_avx512f))
+      (x64_512_vpsravq (put_in_xmm data) (put_in_xmm_mem shift)))
+
+;; =============================================================================
+;; 512-bit Widening Multiply (32x32 -> 64 bit) (AVX-512F)
+;; =============================================================================
+
+;; x86_pmullq_low on I64X8 -> VPMULUDQ (unsigned widening multiply)
+(rule 17 (lower (has_type (multi_lane 64 8) (x86_pmullq_low x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpmuludq (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; x86_smullq_low on I64X8 -> VPMULDQ (signed widening multiply)
+(rule 17 (lower (has_type (multi_lane 64 8) (x86_smullq_low x y)))
+      (if-let true (has_avx512f))
+      (x64_512_vpmuldq (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; =============================================================================
+;; 512-bit Integer <-> Float Conversions (AVX-512DQ)
+;; =============================================================================
+
+;; fcvt_from_sint I64X8 -> F64X8 (VCVTQQ2PD)
+;; Note: I64X8 is (multi_lane 64 8) with int element type
+(rule 17 (lower (has_type (multi_lane 64 8)
+                          (fcvt_from_sint x @ (value_type (multi_lane 64 8)))))
+      (if-let true (has_avx512dq))
+      (x64_512_vcvtqq2pd (put_in_xmm_mem x)))
+
+;; fcvt_to_sint_sat F64X8 -> I64X8 (VCVTTPD2QQ with truncation toward zero)
+;; Note: AVX-512 VCVTTPD2QQ automatically saturates to I64 range, so we use
+;; the truncating version for fcvt_to_sint_sat.
+(rule 17 (lower (has_type (multi_lane 64 8)
+                          (fcvt_to_sint_sat x @ (value_type (multi_lane 64 8)))))
+      (if-let true (has_avx512dq))
+      (x64_512_vcvttpd2qq (put_in_xmm_mem x)))
+
+;; fcvt_from_sint I32X16 -> F32X16 (VCVTDQ2PS)
+(rule 17 (lower (has_type (multi_lane 32 16)
+                          (fcvt_from_sint x @ (value_type (multi_lane 32 16)))))
+      (if-let true (has_avx512f))
+      (x64_512_vcvtdq2ps (put_in_xmm_mem x)))
+
+;; fcvt_to_sint_sat F32X16 -> I32X16 (VCVTTPS2DQ with truncation toward zero)
+(rule 17 (lower (has_type (multi_lane 32 16)
+                          (fcvt_to_sint_sat x @ (value_type (multi_lane 32 16)))))
+      (if-let true (has_avx512f))
+      (x64_512_vcvttps2dq (put_in_xmm_mem x)))
+
+;; =============================================================================
+;; Masked Operation Fusion Patterns
+;; =============================================================================
+;; These patterns detect bitselect(mask, op(x, y), passthru) and fuse into
+;; a single masked AVX-512 instruction with merge mode.
+;; Priority 18 ensures these match before the generic bitselect rules (priority 17).
+
+;; -----------------------------------------------------------------------------
+;; I32X16 (32-bit elements) Masked Arithmetic Fusion
+;; -----------------------------------------------------------------------------
+
+;; bitselect(mask, iadd(x, y), passthru) -> masked VPADDD
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (iadd x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpaddd (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, isub(x, y), passthru) -> masked VPSUBD
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (isub x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpsubd (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, imul(x, y), passthru) -> masked VPMULLD
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (imul x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpmulld (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                            (put_in_xmm x)
+                            (put_in_xmm_mem y)
+                            (put_in_xmm passthru)))
+
+;; bitselect(mask, band(x, y), passthru) -> masked VPANDD
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (band x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpandd (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, bor(x, y), passthru) -> masked VPORD
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (bor x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpord (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                          (put_in_xmm x)
+                          (put_in_xmm_mem y)
+                          (put_in_xmm passthru)))
+
+;; bitselect(mask, bxor(x, y), passthru) -> masked VPXORD
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (bxor x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpxord (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, smin(x, y), passthru) -> masked VPMINSD
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (smin x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpminsd (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                            (put_in_xmm x)
+                            (put_in_xmm_mem y)
+                            (put_in_xmm passthru)))
+
+;; bitselect(mask, smax(x, y), passthru) -> masked VPMAXSD
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (smax x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpmaxsd (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                            (put_in_xmm x)
+                            (put_in_xmm_mem y)
+                            (put_in_xmm passthru)))
+
+;; -----------------------------------------------------------------------------
+;; I64X8 (64-bit elements) Masked Arithmetic Fusion
+;; -----------------------------------------------------------------------------
+
+;; bitselect(mask, iadd(x, y), passthru) -> masked VPADDQ
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (iadd x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpaddq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, isub(x, y), passthru) -> masked VPSUBQ
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (isub x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpsubq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, imul(x, y), passthru) -> masked VPMULLQ (requires AVX-512DQ)
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (imul x y) passthru)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (x64_512_masked_vpmullq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                            (put_in_xmm x)
+                            (put_in_xmm_mem y)
+                            (put_in_xmm passthru)))
+
+;; bitselect(mask, band(x, y), passthru) -> masked VPANDQ
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (band x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpandq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, bor(x, y), passthru) -> masked VPORQ
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (bor x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vporq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                          (put_in_xmm x)
+                          (put_in_xmm_mem y)
+                          (put_in_xmm passthru)))
+
+;; bitselect(mask, bxor(x, y), passthru) -> masked VPXORQ
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (bxor x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpxorq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, smin(x, y), passthru) -> masked VPMINSQ
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (smin x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpminsq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                            (put_in_xmm x)
+                            (put_in_xmm_mem y)
+                            (put_in_xmm passthru)))
+
+;; bitselect(mask, smax(x, y), passthru) -> masked VPMAXSQ
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (smax x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpmaxsq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                            (put_in_xmm x)
+                            (put_in_xmm_mem y)
+                            (put_in_xmm passthru)))
+
+;; bitselect(mask, umin(x, y), passthru) -> masked VPMINUD
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (umin x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpminud (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                            (put_in_xmm x)
+                            (put_in_xmm_mem y)
+                            (put_in_xmm passthru)))
+
+;; bitselect(mask, umax(x, y), passthru) -> masked VPMAXUD
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (umax x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpmaxud (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                            (put_in_xmm x)
+                            (put_in_xmm_mem y)
+                            (put_in_xmm passthru)))
+
+;; bitselect(mask, umin(x, y), passthru) -> masked VPMINUQ
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (umin x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpminuq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                            (put_in_xmm x)
+                            (put_in_xmm_mem y)
+                            (put_in_xmm passthru)))
+
+;; bitselect(mask, umax(x, y), passthru) -> masked VPMAXUQ
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (umax x y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vpmaxuq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                            (put_in_xmm x)
+                            (put_in_xmm_mem y)
+                            (put_in_xmm passthru)))
+
+;; -----------------------------------------------------------------------------
+;; F32X16 (single-precision) Masked Arithmetic Fusion
+;; -----------------------------------------------------------------------------
+
+;; bitselect(mask, fadd(x, y), passthru) -> masked VADDPS
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (fadd x @ (value_type (multi_lane 32 16)) y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vaddps (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, fsub(x, y), passthru) -> masked VSUBPS
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (fsub x @ (value_type (multi_lane 32 16)) y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vsubps (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, fmul(x, y), passthru) -> masked VMULPS
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (fmul x @ (value_type (multi_lane 32 16)) y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vmulps (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, fdiv(x, y), passthru) -> masked VDIVPS
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (fdiv x @ (value_type (multi_lane 32 16)) y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vdivps (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, fmin(x, y), passthru) -> masked VMINPS
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (fmin x @ (value_type (multi_lane 32 16)) y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vminps (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, fmax(x, y), passthru) -> masked VMAXPS
+(rule 18 (lower (has_type (multi_lane 32 16)
+                          (bitselect mask (fmax x @ (value_type (multi_lane 32 16)) y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vmaxps (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; -----------------------------------------------------------------------------
+;; F64X8 (double-precision) Masked Arithmetic Fusion
+;; -----------------------------------------------------------------------------
+
+;; bitselect(mask, fadd(x, y), passthru) -> masked VADDPD
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (fadd x @ (value_type (multi_lane 64 8)) y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vaddpd (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, fsub(x, y), passthru) -> masked VSUBPD
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (fsub x @ (value_type (multi_lane 64 8)) y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vsubpd (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, fmul(x, y), passthru) -> masked VMULPD
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (fmul x @ (value_type (multi_lane 64 8)) y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vmulpd (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, fdiv(x, y), passthru) -> masked VDIVPD
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (fdiv x @ (value_type (multi_lane 64 8)) y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vdivpd (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, fmin(x, y), passthru) -> masked VMINPD
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (fmin x @ (value_type (multi_lane 64 8)) y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vminpd (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; bitselect(mask, fmax(x, y), passthru) -> masked VMAXPD
+(rule 18 (lower (has_type (multi_lane 64 8)
+                          (bitselect mask (fmax x @ (value_type (multi_lane 64 8)) y) passthru)))
+      (if-let true (has_avx512f))
+      (x64_512_masked_vmaxpd (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
+                           (put_in_xmm x)
+                           (put_in_xmm_mem y)
+                           (put_in_xmm passthru)))
+
+;; =============================================================================
+;; Bitcast for 512-bit vector types
+;; =============================================================================
+;; Bitcast between same-sized 512-bit vectors is a no-op (just pass through register)
+;; All 512-bit vectors use ZMM registers, so bitcast is just reinterpretation.
+
+;; 512-bit vectors with 32-bit elements (I32X16 or F32X16) <-> same
+(rule 17 (lower (has_type (multi_lane 32 16)
+                          (bitcast _ src @ (value_type (multi_lane 32 16)))))
+      (put_in_xmm src))
+
+;; 512-bit vectors with 64-bit elements (I64X8 or F64X8) <-> same
+(rule 17 (lower (has_type (multi_lane 64 8)
+                          (bitcast _ src @ (value_type (multi_lane 64 8)))))
+      (put_in_xmm src))
+
+;; Cross-element-size bitcast: 32x16 <-> 64x8 (both 512 bits)
+(rule 17 (lower (has_type (multi_lane 32 16)
+                          (bitcast _ src @ (value_type (multi_lane 64 8)))))
+      (put_in_xmm src))
+
+(rule 17 (lower (has_type (multi_lane 64 8)
+                          (bitcast _ src @ (value_type (multi_lane 32 16)))))
+      (put_in_xmm src))
+
+;; =============================================================================
+;; AVX-512BW Byte/Word Vector Operations
+;; =============================================================================
+;; These operations use AVX-512BW extension for 8-bit and 16-bit element sizes.
+;; I8X64 = 64 bytes in 512-bit register
+;; I16X32 = 32 words in 512-bit register
+
+;; -----------------------------------------------------------------------------
+;; 512-bit Byte Add (iadd) - I8X64 -> VPADDB
+;; -----------------------------------------------------------------------------
+(rule 17 (lower (has_type (multi_lane 8 64) (iadd x y)))
+      (if-let true (has_avx512bw))
+      (x64_512_vpaddb (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; -----------------------------------------------------------------------------
+;; 512-bit Word Add (iadd) - I16X32 -> VPADDW
+;; -----------------------------------------------------------------------------
+(rule 17 (lower (has_type (multi_lane 16 32) (iadd x y)))
+      (if-let true (has_avx512bw))
+      (x64_512_vpaddw (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; -----------------------------------------------------------------------------
+;; 512-bit Byte Subtract (isub) - I8X64 -> VPSUBB
+;; -----------------------------------------------------------------------------
+(rule 17 (lower (has_type (multi_lane 8 64) (isub x y)))
+      (if-let true (has_avx512bw))
+      (x64_512_vpsubb (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; -----------------------------------------------------------------------------
+;; 512-bit Word Subtract (isub) - I16X32 -> VPSUBW
+;; -----------------------------------------------------------------------------
+(rule 17 (lower (has_type (multi_lane 16 32) (isub x y)))
+      (if-let true (has_avx512bw))
+      (x64_512_vpsubw (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; -----------------------------------------------------------------------------
+;; 512-bit Byte Signed Min (smin) - I8X64 -> VPMINSB
+;; -----------------------------------------------------------------------------
+(rule 17 (lower (has_type (multi_lane 8 64) (smin x y)))
+      (if-let true (has_avx512bw))
+      (x64_512_vpminsb (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; -----------------------------------------------------------------------------
+;; 512-bit Word Signed Min (smin) - I16X32 -> VPMINSW
+;; -----------------------------------------------------------------------------
+(rule 17 (lower (has_type (multi_lane 16 32) (smin x y)))
+      (if-let true (has_avx512bw))
+      (x64_512_vpminsw (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; -----------------------------------------------------------------------------
+;; 512-bit Byte Unsigned Min (umin) - I8X64 -> VPMINUB
+;; -----------------------------------------------------------------------------
+(rule 17 (lower (has_type (multi_lane 8 64) (umin x y)))
+      (if-let true (has_avx512bw))
+      (x64_512_vpminub (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; -----------------------------------------------------------------------------
+;; 512-bit Word Unsigned Min (umin) - I16X32 -> VPMINUW
+;; -----------------------------------------------------------------------------
+(rule 17 (lower (has_type (multi_lane 16 32) (umin x y)))
+      (if-let true (has_avx512bw))
+      (x64_512_vpminuw (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; -----------------------------------------------------------------------------
+;; 512-bit Byte Signed Max (smax) - I8X64 -> VPMAXSB
+;; -----------------------------------------------------------------------------
+(rule 17 (lower (has_type (multi_lane 8 64) (smax x y)))
+      (if-let true (has_avx512bw))
+      (x64_512_vpmaxsb (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; -----------------------------------------------------------------------------
+;; 512-bit Word Signed Max (smax) - I16X32 -> VPMAXSW
+;; -----------------------------------------------------------------------------
+(rule 17 (lower (has_type (multi_lane 16 32) (smax x y)))
+      (if-let true (has_avx512bw))
+      (x64_512_vpmaxsw (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; -----------------------------------------------------------------------------
+;; 512-bit Byte Unsigned Max (umax) - I8X64 -> VPMAXUB
+;; -----------------------------------------------------------------------------
+(rule 17 (lower (has_type (multi_lane 8 64) (umax x y)))
+      (if-let true (has_avx512bw))
+      (x64_512_vpmaxub (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; -----------------------------------------------------------------------------
+;; 512-bit Word Unsigned Max (umax) - I16X32 -> VPMAXUW
+;; -----------------------------------------------------------------------------
+(rule 17 (lower (has_type (multi_lane 16 32) (umax x y)))
+      (if-let true (has_avx512bw))
+      (x64_512_vpmaxuw (put_in_xmm x) (put_in_xmm_mem y)))
+
+;; -----------------------------------------------------------------------------
+;; Bitcast for 512-bit byte/word vector types
+;; -----------------------------------------------------------------------------
+;; I8X64 and I16X32 bitcasts - these are no-ops
+(rule 17 (lower (has_type (multi_lane 8 64)
+                          (bitcast _ src @ (value_type (multi_lane 8 64)))))
+      (put_in_xmm src))
+
+(rule 17 (lower (has_type (multi_lane 16 32)
+                          (bitcast _ src @ (value_type (multi_lane 16 32)))))
+      (put_in_xmm src))
+
+;; Cross-element-size bitcasts: 8x64 <-> 16x32 <-> 32x16 <-> 64x8
+(rule 17 (lower (has_type (multi_lane 8 64)
+                          (bitcast _ src @ (value_type (multi_lane 16 32)))))
+      (put_in_xmm src))
+
+(rule 17 (lower (has_type (multi_lane 16 32)
+                          (bitcast _ src @ (value_type (multi_lane 8 64)))))
+      (put_in_xmm src))
+
+(rule 17 (lower (has_type (multi_lane 8 64)
+                          (bitcast _ src @ (value_type (multi_lane 32 16)))))
+      (put_in_xmm src))
+
+(rule 17 (lower (has_type (multi_lane 32 16)
+                          (bitcast _ src @ (value_type (multi_lane 8 64)))))
+      (put_in_xmm src))
+
+(rule 17 (lower (has_type (multi_lane 8 64)
+                          (bitcast _ src @ (value_type (multi_lane 64 8)))))
+      (put_in_xmm src))
+
+(rule 17 (lower (has_type (multi_lane 64 8)
+                          (bitcast _ src @ (value_type (multi_lane 8 64)))))
+      (put_in_xmm src))
+
+(rule 17 (lower (has_type (multi_lane 16 32)
+                          (bitcast _ src @ (value_type (multi_lane 32 16)))))
+      (put_in_xmm src))
+
+(rule 17 (lower (has_type (multi_lane 32 16)
+                          (bitcast _ src @ (value_type (multi_lane 16 32)))))
+      (put_in_xmm src))
+
+(rule 17 (lower (has_type (multi_lane 16 32)
+                          (bitcast _ src @ (value_type (multi_lane 64 8)))))
+      (put_in_xmm src))
+
+(rule 17 (lower (has_type (multi_lane 64 8)
+                          (bitcast _ src @ (value_type (multi_lane 16 32)))))
+      (put_in_xmm src))
+
+;; =============================================================================
+;; AVX-512 Scalar Extract/Insert (extractlane/insertlane for 512-bit vectors)
+;; =============================================================================
+;; These use a two-step approach:
+;; 1. Extract the 128-bit chunk containing the target element
+;; 2. Use scalar PEXTRD/Q or PINSRD/Q on that chunk
+;; 3. For insert, reinsert the modified chunk back into the 512-bit vector
+
+;; -----------------------------------------------------------------------------
+;; I32X16 extractlane - Extract single i32 from 512-bit vector
+;; Lane 0-3: chunk 0, Lane 4-7: chunk 1, Lane 8-11: chunk 2, Lane 12-15: chunk 3
+;; -----------------------------------------------------------------------------
+
+;; I32X16 extractlane lanes 0-3 (chunk 0)
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 0)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 0) 0))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 1)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 0) 1))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 2)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 0) 2))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 3)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 0) 3))
+
+;; I32X16 extractlane lanes 4-7 (chunk 1)
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 4)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 1) 0))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 5)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 1) 1))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 6)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 1) 2))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 7)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 1) 3))
+
+;; I32X16 extractlane lanes 8-11 (chunk 2)
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 8)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 2) 0))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 9)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 2) 1))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 10)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 2) 2))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 11)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 2) 3))
+
+;; I32X16 extractlane lanes 12-15 (chunk 3)
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 12)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 3) 0))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 13)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 3) 1))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 14)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 3) 2))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 15)))
+      (if-let true (has_avx512f))
+      (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 3) 3))
+
+;; -----------------------------------------------------------------------------
+;; I64X8 extractlane - Extract single i64 from 512-bit vector
+;; Lane 0-1: chunk 0, Lane 2-3: chunk 1, Lane 4-5: chunk 2, Lane 6-7: chunk 3
+;; -----------------------------------------------------------------------------
+
+;; I64X8 extractlane lanes 0-1 (chunk 0)
+;; Note: vextracti64x2 requires AVX-512DQ
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 0)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 0) 0))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 1)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 0) 1))
+
+;; I64X8 extractlane lanes 2-3 (chunk 1)
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 2)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 1) 0))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 3)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 1) 1))
+
+;; I64X8 extractlane lanes 4-5 (chunk 2)
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 4)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 2) 0))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 5)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 2) 1))
+
+;; I64X8 extractlane lanes 6-7 (chunk 3)
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 6)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 3) 0))
+
+(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 7)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 3) 1))
+
+;; -----------------------------------------------------------------------------
+;; I32X16 store(extractlane) - Optimized store of extracted i32 from 512-bit vector
+;; These override the generic store(extractlane) rules in lower.isle which don't
+;; handle lane indices > 3 correctly for I32X16.
+;; -----------------------------------------------------------------------------
+
+;; I32X16 store extractlane lanes 0-3 (chunk 0)
+;; Priority 18 to override the generic store(extractlane) rules in lower.isle
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 0)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 0) 0)))
+
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 1)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 0) 1)))
+
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 2)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 0) 2)))
+
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 3)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 0) 3)))
+
+;; I32X16 store extractlane lanes 4-7 (chunk 1)
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 4)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 1) 0)))
+
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 5)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 1) 1)))
+
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 6)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 1) 2)))
+
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 7)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 1) 3)))
+
+;; I32X16 store extractlane lanes 8-11 (chunk 2)
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 8)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 2) 0)))
+
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 9)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 2) 1)))
+
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 10)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 2) 2)))
+
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 11)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 2) 3)))
+
+;; I32X16 store extractlane lanes 12-15 (chunk 3)
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 12)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 3) 0)))
+
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 13)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 3) 1)))
+
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 14)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 3) 2)))
+
+(rule 18 (lower (store (little_or_native_endian flags)
+                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 15)))
+                      address offset))
+      (if-let true (has_avx512f))
+      (if-let true (has_sse41))
+      (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 3) 3)))
+
+;; -----------------------------------------------------------------------------
+;; I32X16 insertlane - Insert single i32 into 512-bit vector
+;; 1. Extract the 128-bit chunk, 2. Insert scalar, 3. Reinsert chunk
+;; -----------------------------------------------------------------------------
+
+;; I32X16 insertlane lanes 0-3 (chunk 0)
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 0)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 0))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 0)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 0)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 1)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 0))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 1)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 0)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 2)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 0))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 2)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 0)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 3)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 0))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 3)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 0)))
+
+;; I32X16 insertlane lanes 4-7 (chunk 1)
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 4)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 1))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 0)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 1)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 5)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 1))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 1)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 1)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 6)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 1))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 2)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 1)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 7)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 1))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 3)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 1)))
+
+;; I32X16 insertlane lanes 8-11 (chunk 2)
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 8)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 2))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 0)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 2)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 9)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 2))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 1)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 2)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 10)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 2))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 2)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 2)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 11)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 2))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 3)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 2)))
+
+;; I32X16 insertlane lanes 12-15 (chunk 3)
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 12)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 3))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 0)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 3)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 13)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 3))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 1)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 3)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 14)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 3))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 2)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 3)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 15)))
+      (if-let true (has_avx512f))
+      (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 3))
+            (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 3)))
+        (x64_512_vinserti32x4 (put_in_xmm vec) modified 3)))
+
+;; -----------------------------------------------------------------------------
+;; I64X8 insertlane - Insert single i64 into 512-bit vector
+;; 1. Extract the 128-bit chunk, 2. Insert scalar, 3. Reinsert chunk
+;; Note: vextracti64x2 and vinserti64x2 require AVX-512DQ
+;; -----------------------------------------------------------------------------
+
+;; I64X8 insertlane lanes 0-1 (chunk 0)
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 0)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 0))
+            (modified Xmm (x64_pinsrq chunk (gpr_to_gpr_mem val) 0)))
+        (x64_512_vinserti64x2 (put_in_xmm vec) modified 0)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 1)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 0))
+            (modified Xmm (x64_pinsrq chunk (gpr_to_gpr_mem val) 1)))
+        (x64_512_vinserti64x2 (put_in_xmm vec) modified 0)))
+
+;; I64X8 insertlane lanes 2-3 (chunk 1)
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 2)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 1))
+            (modified Xmm (x64_pinsrq chunk (gpr_to_gpr_mem val) 0)))
+        (x64_512_vinserti64x2 (put_in_xmm vec) modified 1)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 3)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 1))
+            (modified Xmm (x64_pinsrq chunk (gpr_to_gpr_mem val) 1)))
+        (x64_512_vinserti64x2 (put_in_xmm vec) modified 1)))
+
+;; I64X8 insertlane lanes 4-5 (chunk 2)
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 4)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 2))
+            (modified Xmm (x64_pinsrq chunk (gpr_to_gpr_mem val) 0)))
+        (x64_512_vinserti64x2 (put_in_xmm vec) modified 2)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 5)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 2))
+            (modified Xmm (x64_pinsrq chunk (gpr_to_gpr_mem val) 1)))
+        (x64_512_vinserti64x2 (put_in_xmm vec) modified 2)))
+
+;; I64X8 insertlane lanes 6-7 (chunk 3)
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 6)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 3))
+            (modified Xmm (x64_pinsrq chunk (gpr_to_gpr_mem val) 0)))
+        (x64_512_vinserti64x2 (put_in_xmm vec) modified 3)))
+
+(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 7)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 3))
+            (modified Xmm (x64_pinsrq chunk (gpr_to_gpr_mem val) 1)))
+        (x64_512_vinserti64x2 (put_in_xmm vec) modified 3)))
+
+;; =============================================================================
+;; 512-bit Rotate Left (rotl) - Scalar rotation broadcast to all elements
+;; =============================================================================
+
+;; I32X16 rotl with scalar -> Move GPR to XMM, Broadcast, then VPROLVD
+;; NOTE: CLIF rotl takes a scalar rotation amount that applies to all lanes
+;; We must move the GPR to XMM first because VPBROADCASTD zmm, r32 uses a different
+;; opcode (0x7C) than VPBROADCASTD zmm, xmm/m32 (0x58). Our emit only handles the latter.
+(rule 17 (lower (has_type (multi_lane 32 16) (rotl data rotate)))
+      (if-let true (has_avx512f))
+      (x64_512_vprolvd (put_in_xmm data)
+                     (x64_512_vpbroadcastd (x64_movd_to_xmm (put_in_gpr rotate)))))
+
+;; I64X8 rotl with scalar -> Move GPR to XMM, Broadcast, then VPROLVQ
+;; NOTE: CLIF rotl takes a scalar rotation amount that applies to all lanes
+;; We must move the GPR to XMM first because VPBROADCASTQ zmm, r64 uses a different
+;; opcode (0x7C) than VPBROADCASTQ zmm, xmm/m64 (0x59). Our emit only handles the latter.
+(rule 17 (lower (has_type (multi_lane 64 8) (rotl data rotate)))
+      (if-let true (has_avx512f))
+      (x64_512_vprolvq (put_in_xmm data)
+                     (x64_512_vpbroadcastq (x64_movq_to_xmm (put_in_gpr rotate)))))
+
+;; =============================================================================
+;; 512-bit Bitwise AND NOT pattern: band(x, bnot(y)) -> VPANDND/Q
+;; band_not is legalized to band(x, bnot(y)) before lowering.
+;; VPANDND/Q computes (~src1) & src2
+;; Note: x86 VPANDNQ(a, b) = (~a) & b, so we need to pass (y, x) to get (~y) & x
+;; =============================================================================
+
+;; I16X32: band(x, bnot(y)) -> VPANDND(y, x) = (~y) & x
+(rule 18 (lower (has_type (multi_lane 16 32) (band x (bnot y))))
+      (if-let true (has_avx512f))
+      (x64_512_vpandnd (put_in_xmm y) (put_in_xmm_mem x)))
+
+;; I16X32: band(bnot(y), x) -> VPANDND(y, x) = (~y) & x
+(rule 26 (lower (has_type (multi_lane 16 32) (band (bnot y) x)))
+      (if-let true (has_avx512f))
+      (x64_512_vpandnd (put_in_xmm y) (put_in_xmm_mem x)))
+
+;; I8X64: band(x, bnot(y)) -> VPANDND(y, x) = (~y) & x
+(rule 18 (lower (has_type (multi_lane 8 64) (band x (bnot y))))
+      (if-let true (has_avx512f))
+      (x64_512_vpandnd (put_in_xmm y) (put_in_xmm_mem x)))
+
+;; I8X64: band(bnot(y), x) -> VPANDND(y, x) = (~y) & x
+(rule 26 (lower (has_type (multi_lane 8 64) (band (bnot y) x)))
+      (if-let true (has_avx512f))
+      (x64_512_vpandnd (put_in_xmm y) (put_in_xmm_mem x)))
+
+;; I32X16: band(x, bnot(y)) -> VPANDND(y, x) = (~y) & x
+(rule 18 (lower (has_type (multi_lane 32 16) (band x (bnot y))))
+      (if-let true (has_avx512f))
+      (x64_512_vpandnd (put_in_xmm y) (put_in_xmm_mem x)))
+
+;; I32X16: band(bnot(y), x) -> VPANDND(y, x) = (~y) & x
+(rule 26 (lower (has_type (multi_lane 32 16) (band (bnot y) x)))
+      (if-let true (has_avx512f))
+      (x64_512_vpandnd (put_in_xmm y) (put_in_xmm_mem x)))
+
+;; I64X8: band(x, bnot(y)) -> VPANDNQ(y, x) = (~y) & x
+(rule 18 (lower (has_type (multi_lane 64 8) (band x (bnot y))))
+      (if-let true (has_avx512f))
+      (x64_512_vpandnq (put_in_xmm y) (put_in_xmm_mem x)))
+
+;; I64X8: band(bnot(y), x) -> VPANDNQ(y, x) = (~y) & x
+(rule 26 (lower (has_type (multi_lane 64 8) (band (bnot y) x)))
+      (if-let true (has_avx512f))
+      (x64_512_vpandnq (put_in_xmm y) (put_in_xmm_mem x)))
+
+;; =============================================================================
+;; 512-bit Float Precision Conversions
+;; =============================================================================
+
+;; F32X8 -> F64X8: VCVTPS2PD (widen lower 8 floats to 8 doubles)
+(rule 17 (lower (has_type (multi_lane 64 8) (fpromote x @ (value_type (multi_lane 32 8)))))
+      (if-let true (has_avx512f))
+      (x64_512_vcvtps2pd (put_in_xmm_mem x)))
+
+;; F64X8 -> F32X8: VCVTPD2PS (narrow 8 doubles to 8 floats in lower half)
+(rule 17 (lower (has_type (multi_lane 32 8) (fdemote x @ (value_type (multi_lane 64 8)))))
+      (if-let true (has_avx512f))
+      (x64_512_vcvtpd2ps (put_in_xmm x)))
+
+;; =============================================================================
+;; 512-bit Vector Widening/Narrowing (swiden_low, swiden_high, snarrow)
+;; =============================================================================
+
+;; I32X16 -> I64X8: swiden_low takes lower 8 I32 lanes and sign-extends to I64X8
+;; Uses VEXTRACTI32X8 to get lower 256-bits, then VPMOVSXDQ to sign-extend
+(rule 17 (lower (has_type (multi_lane 64 8) (swiden_low val @ (value_type (multi_lane 32 16)))))
+      (if-let true (has_avx512f))
+      (let ((lo Xmm (x64_512_vextracti32x8 (put_in_xmm val) 0)))
+        (x64_512_vpmovsxdq (RegMem.Reg lo))))
+
+;; I32X16 -> I64X8: swiden_high takes upper 8 I32 lanes and sign-extends to I64X8
+;; Uses VEXTRACTI32X8 to get upper 256-bits, then VPMOVSXDQ to sign-extend
+(rule 17 (lower (has_type (multi_lane 64 8) (swiden_high val @ (value_type (multi_lane 32 16)))))
+      (if-let true (has_avx512f))
+      (let ((hi Xmm (x64_512_vextracti32x8 (put_in_xmm val) 1)))
+        (x64_512_vpmovsxdq (RegMem.Reg hi))))

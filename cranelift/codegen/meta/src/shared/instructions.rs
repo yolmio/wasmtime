@@ -664,6 +664,351 @@ fn define_simd_arithmetic(
         .operands_in(vec![Operand::new("x", IxN), Operand::new("y", IxN)])
         .operands_out(vec![Operand::new("a", IxN)]),
     );
+
+    // Per-element variable shift instructions for SIMD vectors.
+    // These perform per-lane shifts where each lane's shift amount comes from
+    // the corresponding lane in the second operand.
+    //
+    // On x86, these map to VPSLLVD/VPSLLVQ, VPSRLVD/VPSRLVQ, VPSRAVD/VPSRAVQ.
+
+    ig.push(
+        Inst::new(
+            "x86_vpsllv",
+            r#"
+        Per-element variable left shift for SIMD vectors (x86).
+
+        Shifts each lane in ``x`` left by the amount specified in the
+        corresponding lane of ``y``. Shift amounts are masked to the lane size.
+
+        Maps to VPSLLVD (32-bit lanes) or VPSLLVQ (64-bit lanes) on AVX2/AVX-512.
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![
+            Operand::new("x", IxN).with_doc("Vector value to shift"),
+            Operand::new("y", IxN).with_doc("Vector of shift amounts per lane"),
+        ])
+        .operands_out(vec![Operand::new("a", IxN)]),
+    );
+
+    ig.push(
+        Inst::new(
+            "x86_vpsrlv",
+            r#"
+        Per-element variable unsigned right shift for SIMD vectors (x86).
+
+        Shifts each lane in ``x`` right (unsigned) by the amount specified in the
+        corresponding lane of ``y``. Shift amounts are masked to the lane size.
+
+        Maps to VPSRLVD (32-bit lanes) or VPSRLVQ (64-bit lanes) on AVX2/AVX-512.
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![
+            Operand::new("x", IxN).with_doc("Vector value to shift"),
+            Operand::new("y", IxN).with_doc("Vector of shift amounts per lane"),
+        ])
+        .operands_out(vec![Operand::new("a", IxN)]),
+    );
+
+    ig.push(
+        Inst::new(
+            "x86_vpsrav",
+            r#"
+        Per-element variable signed right shift for SIMD vectors (x86).
+
+        Shifts each lane in ``x`` right (signed/arithmetic) by the amount specified
+        in the corresponding lane of ``y``. Shift amounts are masked to the lane size.
+
+        Maps to VPSRAVD (32-bit lanes) or VPSRAVQ (64-bit lanes) on AVX2/AVX-512.
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![
+            Operand::new("x", IxN).with_doc("Vector value to shift"),
+            Operand::new("y", IxN).with_doc("Vector of shift amounts per lane"),
+        ])
+        .operands_out(vec![Operand::new("a", IxN)]),
+    );
+
+    // =========================================================================
+    // Widening multiply instructions (32x32 -> 64 bit)
+    // =========================================================================
+
+    ig.push(
+        Inst::new(
+            "x86_pmullq_low",
+            r#"
+        Widening unsigned 32x32→64 multiply for SIMD vectors (x86).
+
+        Uses the low 32 bits of each 64-bit lane in both operands, multiplies them
+        as unsigned integers, and produces a full 64-bit result per lane.
+
+        For I64X8 input: takes low 32 bits from each of 8 lanes, produces 8 64-bit products.
+
+        Maps to VPMULUDQ on AVX-512.
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![
+            Operand::new("x", IxN).with_doc("First vector operand (low 32 bits used)"),
+            Operand::new("y", IxN).with_doc("Second vector operand (low 32 bits used)"),
+        ])
+        .operands_out(vec![Operand::new("a", IxN)]),
+    );
+
+    ig.push(
+        Inst::new(
+            "x86_smullq_low",
+            r#"
+        Widening signed 32x32→64 multiply for SIMD vectors (x86).
+
+        Uses the low 32 bits of each 64-bit lane in both operands, multiplies them
+        as signed integers, and produces a full 64-bit result per lane.
+
+        For I64X8 input: takes low 32 bits from each of 8 lanes, produces 8 64-bit products.
+
+        Maps to VPMULDQ on AVX-512.
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![
+            Operand::new("x", IxN).with_doc("First vector operand (low 32 bits used)"),
+            Operand::new("y", IxN).with_doc("Second vector operand (low 32 bits used)"),
+        ])
+        .operands_out(vec![Operand::new("a", IxN)]),
+    );
+}
+
+/// Define AVX-512 SIMD memory operations: gather, scatter, masked load/store, compress, expand.
+fn define_simd_memory(ig: &mut InstructionGroupBuilder, formats: &Formats, imm: &Immediates) {
+    // Type variable for 512-bit SIMD vectors
+    let IxN512 = &TypeVar::new(
+        "IxN512",
+        "A 512-bit SIMD vector type containing integers (I32X16 or I64X8)",
+        TypeSetBuilder::new()
+            .ints(32..64)
+            .simd_lanes(8..16)
+            .includes_scalars(false)
+            .build(),
+    );
+
+    // Type variable for vector indices (I32X16 or I64X8)
+    let Idx = &TypeVar::new(
+        "Idx",
+        "A SIMD vector type containing integer indices",
+        TypeSetBuilder::new()
+            .ints(32..64)
+            .simd_lanes(8..16)
+            .includes_scalars(false)
+            .build(),
+    );
+
+    // Pointer type for base addresses
+    let iAddr = &TypeVar::new(
+        "iAddr",
+        "An integer address type",
+        TypeSetBuilder::new().ints(32..64).build(),
+    );
+
+    // Mask type - a vector of integers where each lane is a mask bit
+    let Mask = &TypeVar::new(
+        "Mask",
+        "A SIMD vector mask type",
+        TypeSetBuilder::new()
+            .ints(32..64)
+            .simd_lanes(8..16)
+            .includes_scalars(false)
+            .build(),
+    );
+
+    // =========================================================================
+    // x86_simd_gather - Gather elements from memory using vector indices
+    // =========================================================================
+    ig.push(
+        Inst::new(
+            "x86_simd_gather",
+            r#"
+        Gather elements from memory using vector indices (AVX-512).
+
+        Loads elements from memory addresses computed as `base + indices * scale + offset`.
+        Each lane in the indices vector provides an index; the corresponding element is
+        loaded from memory.
+
+        This instruction requires AVX-512 support. The indices vector determines which
+        memory locations to read. For I32X16, each i32 index is scaled by the element
+        size (4 bytes). For I64X8, each i64 index is scaled by 8 bytes.
+
+        The `scale` parameter must be 1, 2, 4, or 8.
+
+        Returns a vector with the gathered elements.
+        "#,
+            &formats.simd_gather,
+        )
+        .operands_in(vec![
+            Operand::new("MemFlags", &imm.memflags),
+            Operand::new("base", iAddr).with_doc("Base address for gather"),
+            Operand::new("indices", Idx).with_doc("Vector of indices"),
+            Operand::new("scale", &imm.uimm8).with_doc("Scale factor: 1, 2, 4, or 8"),
+            Operand::new("Offset", &imm.offset32).with_doc("Constant offset added to each address"),
+        ])
+        .operands_out(vec![
+            Operand::new("result", IxN512).with_doc("Gathered elements"),
+        ])
+        .can_load(),
+    );
+
+    // =========================================================================
+    // x86_simd_scatter - Scatter elements to memory using vector indices
+    // =========================================================================
+    ig.push(
+        Inst::new(
+            "x86_simd_scatter",
+            r#"
+        Scatter elements to memory using vector indices (AVX-512).
+
+        Stores elements to memory addresses computed as `base + indices * scale + offset`.
+        Only elements where the corresponding mask bit is set are written.
+
+        This instruction requires AVX-512 support. The mask determines which elements
+        are scattered - a mask bit of 1 means the element is stored, 0 means skipped.
+
+        The `scale` parameter must be 1, 2, 4, or 8.
+        "#,
+            &formats.simd_scatter,
+        )
+        .operands_in(vec![
+            Operand::new("MemFlags", &imm.memflags),
+            Operand::new("mask", Mask).with_doc("Mask vector - scatter only where mask bit is 1"),
+            Operand::new("value", IxN512).with_doc("Vector of values to scatter"),
+            Operand::new("base", iAddr).with_doc("Base address for scatter"),
+            Operand::new("indices", Idx).with_doc("Vector of indices"),
+            Operand::new("scale", &imm.uimm8).with_doc("Scale factor: 1, 2, 4, or 8"),
+            Operand::new("Offset", &imm.offset32).with_doc("Constant offset added to each address"),
+        ])
+        .can_store()
+        .other_side_effects(),
+    );
+
+    // =========================================================================
+    // x86_simd_masked_load - Load with mask (fault suppression)
+    // =========================================================================
+    ig.push(
+        Inst::new(
+            "x86_simd_masked_load",
+            r#"
+        Masked vector load with fault suppression (AVX-512).
+
+        Loads elements from memory where the mask bit is 1. For lanes where the mask
+        bit is 0, the corresponding lane from `passthru` is used instead.
+
+        This instruction supports fault suppression: if a masked-off lane would cause
+        a page fault, the fault is suppressed. This is useful for speculatively loading
+        data that might be past the end of an array.
+
+        Requires AVX-512 support.
+        "#,
+            &formats.simd_masked_mem,
+        )
+        .operands_in(vec![
+            Operand::new("MemFlags", &imm.memflags),
+            Operand::new("mask", Mask).with_doc("Mask vector - load where mask bit is 1"),
+            Operand::new("passthru", IxN512).with_doc("Values for masked-off lanes"),
+            Operand::new("base", iAddr).with_doc("Base address for load"),
+            Operand::new("Offset", &imm.offset32).with_doc("Byte offset from base address"),
+        ])
+        .operands_out(vec![
+            Operand::new("result", IxN512).with_doc("Loaded vector"),
+        ])
+        .can_load(),
+    );
+
+    // =========================================================================
+    // x86_simd_masked_store - Store with mask
+    // =========================================================================
+    ig.push(
+        Inst::new(
+            "x86_simd_masked_store",
+            r#"
+        Masked vector store (AVX-512).
+
+        Stores elements to memory where the mask bit is 1. Lanes where the mask
+        bit is 0 are not written to memory.
+
+        Requires AVX-512 support.
+        "#,
+            &formats.simd_masked_mem,
+        )
+        .operands_in(vec![
+            Operand::new("MemFlags", &imm.memflags),
+            Operand::new("mask", Mask).with_doc("Mask vector - store where mask bit is 1"),
+            Operand::new("value", IxN512).with_doc("Vector of values to store"),
+            Operand::new("base", iAddr).with_doc("Base address for store"),
+            Operand::new("Offset", &imm.offset32).with_doc("Byte offset from base address"),
+        ])
+        .can_store(),
+    );
+
+    // =========================================================================
+    // x86_simd_compress - Compress elements based on mask
+    // =========================================================================
+    ig.push(
+        Inst::new(
+            "x86_simd_compress",
+            r#"
+        Compress vector elements based on mask (AVX-512).
+
+        Packs elements where the mask bit is 1 into contiguous lanes starting from
+        lane 0. The remaining lanes (where mask was 0) are zeroed.
+
+        For example, if mask = [1,0,1,0,1,1,0,0] and value = [a,b,c,d,e,f,g,h],
+        the result is [a,c,e,f,0,0,0,0].
+
+        This is useful for removing filtered elements and packing valid results together.
+
+        Requires AVX-512 VBMI2 support.
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![
+            Operand::new("mask", Mask).with_doc("Mask vector - compress where mask bit is 1"),
+            Operand::new("value", IxN512).with_doc("Vector of values to compress"),
+        ])
+        .operands_out(vec![
+            Operand::new("result", IxN512).with_doc("Compressed vector"),
+        ]),
+    );
+
+    // =========================================================================
+    // x86_simd_expand - Expand elements based on mask
+    // =========================================================================
+    ig.push(
+        Inst::new(
+            "x86_simd_expand",
+            r#"
+        Expand vector elements based on mask (AVX-512).
+
+        Takes consecutive elements from the low lanes of `value` and places them
+        in positions where the mask bit is 1. Lanes where the mask is 0 are zeroed.
+
+        For example, if mask = [1,0,1,0,1,1,0,0] and value = [a,b,c,d,...],
+        the result is [a,0,b,0,c,d,0,0].
+
+        This is the inverse of compress - it unpacks contiguous data into sparse positions.
+
+        Requires AVX-512 VBMI2 support.
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![
+            Operand::new("mask", Mask)
+                .with_doc("Mask vector - expand to positions where mask bit is 1"),
+            Operand::new("value", IxN512).with_doc("Vector of contiguous values to expand"),
+        ])
+        .operands_out(vec![
+            Operand::new("result", IxN512).with_doc("Expanded vector"),
+        ]),
+    );
 }
 
 pub(crate) fn define(
@@ -677,6 +1022,7 @@ pub(crate) fn define(
     define_control_flow(&mut ig, formats, imm, entities);
     define_simd_lane_access(&mut ig, formats, imm, entities);
     define_simd_arithmetic(&mut ig, formats, imm, entities);
+    define_simd_memory(&mut ig, formats, imm);
 
     // Operand kind shorthands.
     let i8: &TypeVar = &ValueType::from(LaneType::from(types::Int::I8)).into();
@@ -1930,8 +2276,18 @@ pub(crate) fn define(
         .operands_out(vec![Operand::new("a", I16or32)]),
     );
 
-    // Integer division and remainder are scalar-only; most
-    // hardware does not directly support vector integer division.
+    // Integer division and remainder operations.
+    // Now supports both scalar and vector types. Vector division is implemented
+    // via lane-by-lane scalar operations or float conversion on supported hardware.
+    let iBxN = &TypeVar::new(
+        "iBxN",
+        "A scalar or SIMD vector integer type",
+        TypeSetBuilder::new()
+            .ints(Interval::All)
+            .simd_lanes(Interval::All)
+            .includes_scalars(true)
+            .build(),
+    );
 
     ig.push(
         Inst::new(
@@ -1940,11 +2296,12 @@ pub(crate) fn define(
         Unsigned integer division: `a := \lfloor {x \over y} \rfloor`.
 
         This operation traps if the divisor is zero.
+        For vector types, division is performed lane-by-lane.
         "#,
             &formats.binary,
         )
-        .operands_in(vec![Operand::new("x", iB), Operand::new("y", iB)])
-        .operands_out(vec![Operand::new("a", iB)])
+        .operands_in(vec![Operand::new("x", iBxN), Operand::new("y", iBxN)])
+        .operands_out(vec![Operand::new("a", iBxN)])
         .can_trap()
         .side_effects_idempotent(),
     );
@@ -1959,11 +2316,12 @@ pub(crate) fn define(
         This operation traps if the divisor is zero, or if the result is not
         representable in `B` bits two's complement. This only happens
         when `x = -2^{B-1}, y = -1`.
+        For vector types, division is performed lane-by-lane.
         "#,
             &formats.binary,
         )
-        .operands_in(vec![Operand::new("x", iB), Operand::new("y", iB)])
-        .operands_out(vec![Operand::new("a", iB)])
+        .operands_in(vec![Operand::new("x", iBxN), Operand::new("y", iBxN)])
+        .operands_out(vec![Operand::new("a", iBxN)])
         .can_trap()
         .side_effects_idempotent(),
     );
@@ -1975,11 +2333,12 @@ pub(crate) fn define(
         Unsigned integer remainder.
 
         This operation traps if the divisor is zero.
+        For vector types, remainder is performed lane-by-lane.
         "#,
             &formats.binary,
         )
-        .operands_in(vec![Operand::new("x", iB), Operand::new("y", iB)])
-        .operands_out(vec![Operand::new("a", iB)])
+        .operands_in(vec![Operand::new("x", iBxN), Operand::new("y", iBxN)])
+        .operands_out(vec![Operand::new("a", iBxN)])
         .can_trap()
         .side_effects_idempotent(),
     );
@@ -1991,11 +2350,12 @@ pub(crate) fn define(
         Signed integer remainder. The result has the sign of the dividend.
 
         This operation traps if the divisor is zero.
+        For vector types, remainder is performed lane-by-lane.
         "#,
             &formats.binary,
         )
-        .operands_in(vec![Operand::new("x", iB), Operand::new("y", iB)])
-        .operands_out(vec![Operand::new("a", iB)])
+        .operands_in(vec![Operand::new("x", iBxN), Operand::new("y", iBxN)])
+        .operands_out(vec![Operand::new("a", iBxN)])
         .can_trap()
         .side_effects_idempotent(),
     );
@@ -2720,11 +3080,15 @@ pub(crate) fn define(
         Starting from the MSB in ``x``, count the number of zero bits before
         reaching the first one bit. When ``x`` is zero, returns the size of x
         in bits.
+
+        For vector types, this operation is applied lane-wise, returning a
+        vector of the same type where each lane contains the leading zero
+        count for the corresponding input lane.
         "#,
             &formats.unary,
         )
-        .operands_in(vec![Operand::new("x", iB)])
-        .operands_out(vec![Operand::new("a", iB)]),
+        .operands_in(vec![Operand::new("x", Int)])
+        .operands_out(vec![Operand::new("a", Int)]),
     );
 
     ig.push(

@@ -35,6 +35,8 @@
 (extern constructor value_array_2_ctor value_array_2_ctor)
 (decl value_array_3_ctor (Value Value Value) ValueArray3)
 (extern constructor value_array_3_ctor value_array_3_ctor)
+(decl value_array_4_ctor (Value Value Value Value) ValueArray4)
+(extern constructor value_array_4_ctor value_array_4_ctor)
 
 (rule (eq ty x y) (icmp ty (IntCC.Equal) x y))
 (rule (ne ty x y) (icmp ty (IntCC.NotEqual) x y))

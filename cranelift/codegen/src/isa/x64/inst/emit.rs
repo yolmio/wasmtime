@@ -735,7 +735,7 @@ pub(crate) fn emit(
             // Emit jump table (table of 32-bit offsets).
             sink.bind_label(start_of_jumptable, state.ctrl_plane_mut());
             let jt_off = sink.cur_offset();
-            for &target in targets.iter().chain(core::iter::once(default_target)) {
+            for &target in targets.iter().chain(std::iter::once(default_target)) {
                 let word_off = sink.cur_offset();
                 // off_into_table is an addend here embedded in the label to be later patched at
                 // the end of codegen. The offset is initially relative to this jump table entry;
@@ -1820,6 +1820,56 @@ pub(crate) fn emit(
 
         Inst::SequencePoint { .. } => {
             // Nothing.
+        }
+
+        // AVX-512 instructions that require manual implementation
+        // (VSIB addressing for gather/scatter, dual k-register output for vp2intersect,
+        // k-register spill/fill for regalloc)
+        Inst::Avx512KmovKK { dst, src } => {
+            avx512::emit::emit_kmov_kk(*dst, *src, sink);
+        }
+
+        Inst::Avx512KmovLoad { dst, addr } => {
+            let addr = addr.finalize(state.frame_layout(), sink);
+            avx512::emit::emit_kmov_load(*dst, &addr, sink);
+        }
+
+        Inst::Avx512KmovStore { src, addr } => {
+            let addr = addr.finalize(state.frame_layout(), sink);
+            avx512::emit::emit_kmov_store(*src, &addr, sink);
+        }
+
+        Inst::Avx512Gather {
+            op,
+            dst,
+            base,
+            index,
+            scale,
+            disp,
+            mask,
+        } => {
+            avx512::emit::emit_gather(*op, *dst, *base, *index, *scale, *disp, *mask, sink);
+        }
+
+        Inst::Avx512Scatter {
+            op,
+            src,
+            base,
+            index,
+            scale,
+            disp,
+            mask,
+        } => {
+            avx512::emit::emit_scatter(*op, *src, *base, *index, *scale, *disp, *mask, sink);
+        }
+
+        Inst::Avx512Vp2Intersect {
+            op,
+            dst_k,
+            src1,
+            src2,
+        } => {
+            avx512::emit::emit_x64_512_vp2intersect_inst(*op, *dst_k, *src1, src2, sink);
         }
 
         Inst::External { inst } => {

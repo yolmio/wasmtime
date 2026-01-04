@@ -1,15 +1,28 @@
 //! Register definitions for regalloc2.
 //!
 //! We define 16 GPRs, with indices equal to the hardware encoding,
-//! and 16 XMM registers.
+//! and up to 32 XMM/YMM/ZMM registers.
 //!
 //! Note also that we make use of pinned VRegs to refer to PRegs.
+//!
+//! ## AVX-512 Register Support
+//!
+//! AVX-512 provides 32 ZMM registers (zmm0-zmm31). When AVX-512 is enabled,
+//! all 32 registers are exposed to the register allocator:
+//!
+//! - **xmm0-xmm15**: Available with SSE, AVX (VEX), and AVX-512 (EVEX) encoding
+//! - **xmm16-xmm31**: Available only with AVX-512 (EVEX) encoding
+//!
+//! The extended registers (16-31) are conditionally added to the allocatable
+//! register pool when `has_avx512f` is enabled. This is safe because all
+//! 512-bit vector operations use EVEX encoding, which supports the full
+//! 32-register file.
 
 use crate::machinst::Reg;
-use alloc::string::String;
 use alloc::string::ToString;
 use cranelift_assembler_x64::{gpr, xmm};
 use regalloc2::{PReg, RegClass, VReg};
+use std::string::String;
 
 // Constructors for Regs.
 
@@ -135,6 +148,95 @@ pub(crate) const fn xmm15() -> Reg {
     fpr(xmm::enc::XMM15)
 }
 
+// AVX-512 extended registers (xmm16-xmm31)
+// These require EVEX encoding and are only available with AVX-512.
+pub(crate) const fn xmm16() -> Reg {
+    fpr(xmm::enc::XMM16)
+}
+pub(crate) const fn xmm17() -> Reg {
+    fpr(xmm::enc::XMM17)
+}
+pub(crate) const fn xmm18() -> Reg {
+    fpr(xmm::enc::XMM18)
+}
+pub(crate) const fn xmm19() -> Reg {
+    fpr(xmm::enc::XMM19)
+}
+pub(crate) const fn xmm20() -> Reg {
+    fpr(xmm::enc::XMM20)
+}
+pub(crate) const fn xmm21() -> Reg {
+    fpr(xmm::enc::XMM21)
+}
+pub(crate) const fn xmm22() -> Reg {
+    fpr(xmm::enc::XMM22)
+}
+pub(crate) const fn xmm23() -> Reg {
+    fpr(xmm::enc::XMM23)
+}
+pub(crate) const fn xmm24() -> Reg {
+    fpr(xmm::enc::XMM24)
+}
+pub(crate) const fn xmm25() -> Reg {
+    fpr(xmm::enc::XMM25)
+}
+pub(crate) const fn xmm26() -> Reg {
+    fpr(xmm::enc::XMM26)
+}
+pub(crate) const fn xmm27() -> Reg {
+    fpr(xmm::enc::XMM27)
+}
+pub(crate) const fn xmm28() -> Reg {
+    fpr(xmm::enc::XMM28)
+}
+pub(crate) const fn xmm29() -> Reg {
+    fpr(xmm::enc::XMM29)
+}
+pub(crate) const fn xmm30() -> Reg {
+    fpr(xmm::enc::XMM30)
+}
+pub(crate) const fn xmm31() -> Reg {
+    fpr(xmm::enc::XMM31)
+}
+
+// K-registers are AVX-512 mask registers.
+// These are physical registers with hardware encodings 0-7 (k0-k7).
+pub(crate) const fn k_preg(enc: u8) -> PReg {
+    PReg::new(enc as usize, RegClass::Vector)
+}
+
+const fn k_reg(enc: u8) -> Reg {
+    let preg = k_preg(enc);
+    // Create as a real register, not a virtual register
+    // This allows reg_def/reg_use to properly identify it as fixed/nonallocatable
+    Reg::from_real_reg(preg)
+}
+
+pub(crate) const fn k0() -> Reg {
+    k_reg(0)
+}
+pub(crate) const fn k1() -> Reg {
+    k_reg(1)
+}
+pub(crate) const fn k2() -> Reg {
+    k_reg(2)
+}
+pub(crate) const fn k3() -> Reg {
+    k_reg(3)
+}
+pub(crate) const fn k4() -> Reg {
+    k_reg(4)
+}
+pub(crate) const fn k5() -> Reg {
+    k_reg(5)
+}
+pub(crate) const fn k6() -> Reg {
+    k_reg(6)
+}
+pub(crate) const fn k7() -> Reg {
+    k_reg(7)
+}
+
 // N.B.: this is not an `impl PrettyPrint for Reg` because it is
 // specific to x64; other backends have analogous functions. The
 // disambiguation happens statically by virtue of higher-level,
@@ -145,7 +247,7 @@ pub(crate) const fn xmm15() -> Reg {
 pub fn pretty_print_reg(reg: Reg, size: u8) -> String {
     if let Some(rreg) = reg.to_real_reg() {
         let enc = rreg.hw_enc();
-        let name = match rreg.class() {
+        match rreg.class() {
             RegClass::Int => {
                 let size = match size {
                     8 => gpr::Size::Quadword,
@@ -154,12 +256,11 @@ pub fn pretty_print_reg(reg: Reg, size: u8) -> String {
                     1 => gpr::Size::Byte,
                     _ => unreachable!("invalid size"),
                 };
-                gpr::enc::to_string(enc, size)
+                gpr::enc::to_string(enc, size).to_string()
             }
-            RegClass::Float => xmm::enc::to_string(enc),
-            RegClass::Vector => unreachable!(),
-        };
-        name.to_string()
+            RegClass::Float => xmm::enc::to_string(enc).to_string(),
+            RegClass::Vector => format!("k{enc}"),
+        }
     } else {
         let mut name = format!("%{reg:?}");
         // Add size suffixes to GPR virtual registers at narrower widths.

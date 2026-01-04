@@ -31,13 +31,13 @@ use regalloc2::{
 };
 use rustc_hash::FxHashMap;
 
-use crate::HashMap;
-use crate::hash_map::Entry;
 use core::cmp::Ordering;
 use core::fmt::{self, Write};
 use core::mem::take;
 use core::ops::Range;
 use cranelift_entity::{Keys, entity_impl};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 /// Index referring to an instruction in VCode.
 pub type InsnIndex = regalloc2::Inst;
@@ -808,7 +808,7 @@ impl<I: VCodeInst> VCode<I> {
         let mut cur_srcloc = None;
         let mut last_offset = None;
         let mut inst_offsets = vec![];
-        let mut state = I::State::new(&self.abi, core::mem::take(ctrl_plane));
+        let mut state = I::State::new(&self.abi, std::mem::take(ctrl_plane));
 
         let mut disasm = String::new();
 
@@ -1068,7 +1068,7 @@ impl<I: VCodeInst> VCode<I> {
                                 let from_rreg = Reg::from(from);
                                 let to_rreg = Writable::from_reg(Reg::from(to));
                                 debug_assert_eq!(from.class(), to.class());
-                                let ty = I::canonical_type_for_rc(from.class());
+                                let ty = self.abi.canonical_type_for_rc(from.class());
                                 let mv = I::gen_move(to_rreg, from_rreg, ty);
                                 do_emit(&mv, &mut disasm, &mut buffer, &mut state);
                             }
@@ -1552,7 +1552,7 @@ impl<I: VCodeInst> VCode<I> {
     }
 }
 
-impl<I: VCodeInst> core::ops::Index<InsnIndex> for VCode<I> {
+impl<I: VCodeInst> std::ops::Index<InsnIndex> for VCode<I> {
     type Output = I;
     fn index(&self, idx: InsnIndex) -> &Self::Output {
         &self.insts[idx.index()]
@@ -1796,6 +1796,22 @@ impl<I: VCodeInst> VRegAllocator<I> {
         Ok(regs)
     }
 
+    /// Allocate a fresh Reg with an explicit register class.
+    pub fn alloc_regclass(&mut self, rc: RegClass, ty: Type) -> CodegenResult<Reg> {
+        if self.deferred_error.is_some() {
+            return Err(CodegenError::CodeTooLarge);
+        }
+        let v = self.vreg_types.len();
+        if v + 1 >= VReg::MAX {
+            return Err(CodegenError::CodeTooLarge);
+        }
+
+        let reg = Reg::from_virtual_reg(VReg::new(v, rc));
+        self.vreg_types.push(ty);
+        self.facts.resize(self.vreg_types.len(), None);
+        Ok(reg)
+    }
+
     /// Allocate a fresh ValueRegs, deferring any out-of-vregs
     /// errors. This is useful in places where we cannot bubble a
     /// `CodegenResult` upward easily, and which are known to be
@@ -1807,6 +1823,17 @@ impl<I: VCodeInst> VRegAllocator<I> {
             Err(e) => {
                 self.deferred_error = Some(e);
                 self.bogus_for_deferred_error(ty)
+            }
+        }
+    }
+
+    /// Allocate a fresh Reg with an explicit register class, deferring errors.
+    pub fn alloc_regclass_with_deferred_error(&mut self, rc: RegClass, ty: Type) -> Reg {
+        match self.alloc_regclass(rc, ty) {
+            Ok(reg) => reg,
+            Err(e) => {
+                self.deferred_error = Some(e);
+                Reg::from_virtual_reg(VReg::new(0, rc))
             }
         }
     }
@@ -2040,7 +2067,7 @@ impl VCodeConstantData {
 #[cfg(test)]
 mod test {
     use super::*;
-    use core::mem::size_of;
+    use std::mem::size_of;
 
     #[test]
     fn size_of_constant_structs() {

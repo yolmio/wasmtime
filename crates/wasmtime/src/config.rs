@@ -3988,10 +3988,13 @@ fn detect_host_feature(feature: &str) -> Option<bool> {
             "bmi1" => Some(std::is_x86_feature_detected!("bmi1")),
             "bmi2" => Some(std::is_x86_feature_detected!("bmi2")),
             "avx512bitalg" => Some(std::is_x86_feature_detected!("avx512bitalg")),
+            "avx512bw" => Some(std::is_x86_feature_detected!("avx512bw")),
             "avx512dq" => Some(std::is_x86_feature_detected!("avx512dq")),
             "avx512f" => Some(std::is_x86_feature_detected!("avx512f")),
             "avx512vl" => Some(std::is_x86_feature_detected!("avx512vl")),
             "avx512vbmi" => Some(std::is_x86_feature_detected!("avx512vbmi")),
+            "avx512vpopcntdq" => Some(std::is_x86_feature_detected!("avx512vpopcntdq")),
+            "avx512cd" => Some(std::is_x86_feature_detected!("avx512cd")),
             "lzcnt" => Some(std::is_x86_feature_detected!("lzcnt")),
 
             _ => None,

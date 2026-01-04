@@ -91,11 +91,20 @@ pub fn infer_native_flags(isa_builder: &mut dyn Configurable) -> Result<(), &'st
         if std::is_x86_feature_detected!("avx512f") {
             isa_builder.enable("has_avx512f").unwrap();
         }
+        if std::is_x86_feature_detected!("avx512bw") {
+            isa_builder.enable("has_avx512bw").unwrap();
+        }
         if std::is_x86_feature_detected!("avx512vl") {
             isa_builder.enable("has_avx512vl").unwrap();
         }
         if std::is_x86_feature_detected!("avx512vbmi") {
             isa_builder.enable("has_avx512vbmi").unwrap();
+        }
+        if std::is_x86_feature_detected!("avx512vpopcntdq") {
+            isa_builder.enable("has_avx512vpopcntdq").unwrap();
+        }
+        if std::is_x86_feature_detected!("avx512cd") {
+            isa_builder.enable("has_avx512cd").unwrap();
         }
         if std::is_x86_feature_detected!("lzcnt") {
             isa_builder.enable("has_lzcnt").unwrap();

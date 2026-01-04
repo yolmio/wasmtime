@@ -22,6 +22,9 @@
 //! #     type ReadXmm = u8;
 //! #     type ReadWriteXmm = u8;
 //! #     type WriteXmm = u8;
+//! #     type ReadKmask = u8;
+//! #     type ReadWriteKmask = u8;
+//! #     type WriteKmask = u8;
 //! # }
 //! let xmm0: u8 = 0;
 //! let andps = inst::andps_a::<Regs>::new(xmm0, xmm0);

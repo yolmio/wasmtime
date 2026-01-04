@@ -1,13 +1,14 @@
 //! Interface with the external assembler crate.
 
 use super::{
-    Amode, Gpr, Inst, LabelUse, MachBuffer, MachLabel, OperandVisitor, OperandVisitorImpl,
-    SyntheticAmode, VCodeConstant, WritableGpr, WritableXmm, Xmm, args::FromWritableReg,
+    Amode, Gpr, Inst, LabelUse, MachBuffer, MachLabel, Mask, OperandVisitor, OperandVisitorImpl,
+    SyntheticAmode, VCodeConstant, WritableGpr, WritableMask, WritableXmm, Xmm,
+    args::FromWritableReg,
 };
 use crate::{Reg, Writable, ir::TrapCode};
-use alloc::string::String;
 use cranelift_assembler_x64 as asm;
 use regalloc2::{PReg, RegClass};
+use std::string::String;
 
 /// Define the types of registers Cranelift will use.
 #[derive(Clone, Debug)]
@@ -19,6 +20,9 @@ impl asm::Registers for CraneliftRegisters {
     type ReadXmm = Xmm;
     type ReadWriteXmm = PairedXmm;
     type WriteXmm = WritableXmm;
+    type ReadKmask = Mask;
+    type ReadWriteKmask = PairedMask;
+    type WriteKmask = WritableMask;
 }
 
 /// Convenience type alias of `asm::inst::Inst` with `R = CraneliftRegisters`
@@ -194,6 +198,74 @@ impl asm::AsReg for PairedXmm {
     }
 }
 
+/// A pair of mask registers, one for reading and one for writing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[expect(missing_docs, reason = "self-describing variants")]
+pub struct PairedMask {
+    pub read: Mask,
+    pub write: WritableMask,
+}
+
+impl From<WritableMask> for PairedMask {
+    fn from(wmask: WritableMask) -> Self {
+        let read = wmask.to_reg();
+        let write = wmask;
+        Self { read, write }
+    }
+}
+
+/// For ABI ergonomics.
+impl From<WritableMask> for asm::Kmask<PairedMask> {
+    fn from(wmask: WritableMask) -> Self {
+        asm::Kmask::new(wmask.into())
+    }
+}
+
+impl asm::AsReg for PairedMask {
+    fn enc(&self) -> u8 {
+        let PairedMask { read, write } = self;
+        let read = enc_mask(read);
+        let write = enc_mask(&write.to_reg());
+        assert_eq!(read, write);
+        write
+    }
+
+    fn to_string(&self, size: Option<asm::Size>) -> String {
+        assert!(size.is_none(), "Mask registers do not have size variants");
+        if self.read.is_real() {
+            asm::kmask::enc::to_string(self.enc()).into()
+        } else {
+            let read = self.read.to_reg();
+            let write = self.write.to_reg().to_reg();
+            format!("(%{write:?} <- %{read:?})")
+        }
+    }
+
+    fn new(_: u8) -> Self {
+        panic!("disallow creation of new assembler registers")
+    }
+}
+
+/// This bridges the gap between codegen and assembler for mask register types.
+impl asm::AsReg for Mask {
+    fn enc(&self) -> u8 {
+        enc_mask(self)
+    }
+
+    fn to_string(&self, size: Option<asm::Size>) -> String {
+        assert!(size.is_none(), "Mask registers do not have size variants");
+        if self.is_real() {
+            asm::kmask::enc::to_string(self.enc()).into()
+        } else {
+            format!("%{:?}", self.to_reg())
+        }
+    }
+
+    fn new(_: u8) -> Self {
+        panic!("disallow creation of new assembler registers")
+    }
+}
+
 /// This bridges the gap between codegen and assembler for general purpose register types.
 impl asm::AsReg for Gpr {
     fn enc(&self) -> u8 {
@@ -251,6 +323,19 @@ fn enc_xmm(xmm: &Xmm) -> u8 {
     } else {
         unreachable!()
     }
+}
+
+/// A helper method for extracting the hardware encoding of a mask register.
+/// K-registers use hardware encodings 0-7 (k0-k7).
+#[inline]
+fn enc_mask(mask: &Mask) -> u8 {
+    let real = mask
+        .to_reg()
+        .to_real_reg()
+        .expect("enc_mask requires an allocated physical register, not a virtual register");
+    let hw_enc = real.hw_enc();
+    debug_assert!(hw_enc < 8, "invalid k-register hw_enc: {hw_enc}");
+    hw_enc
 }
 
 /// A wrapper to implement the `cranelift-assembler-x64` register allocation trait,
@@ -326,6 +411,20 @@ impl<'a, T: OperandVisitor> asm::RegisterVisitor<CraneliftRegisters> for Regallo
     fn fixed_write_xmm(&mut self, reg: &mut WritableXmm, enc: u8) {
         self.collector
             .reg_fixed_def(reg, fixed_reg(enc, RegClass::Float));
+    }
+
+    fn read_kmask(&mut self, reg: &mut Mask) {
+        self.collector.reg_use(reg);
+    }
+
+    fn read_write_kmask(&mut self, reg: &mut PairedMask) {
+        let PairedMask { read, write } = reg;
+        self.collector.reg_use(read);
+        self.collector.reg_reuse_def(write, 0);
+    }
+
+    fn write_kmask(&mut self, reg: &mut WritableMask) {
+        self.collector.reg_def(reg);
     }
 }
 

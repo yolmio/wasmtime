@@ -9,6 +9,7 @@ use crate::evex::EvexPrefix;
 use crate::features::{AvailableFeatures, Feature, Features};
 use crate::gpr::{self, Gpr, Size};
 use crate::imm::{Extension, Imm8, Imm16, Imm32, Imm64, Simm8, Simm32};
+use crate::kmask::Kmask;
 use crate::mem::{Amode, GprMem, XmmMem};
 use crate::rex::RexPrefix;
 use crate::vex::VexPrefix;
@@ -34,6 +35,9 @@ include!(concat!(env!("OUT_DIR"), "/assembler.rs"));
 ///     type ReadXmm = u8;
 ///     type ReadWriteXmm = u8;
 ///     type WriteXmm = u8;
+///     type ReadKmask = u8;
+///     type ReadWriteKmask = u8;
+///     type WriteKmask = u8;
 /// }
 ///
 /// // Define a target that says all CPU features are available.

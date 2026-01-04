@@ -110,6 +110,15 @@ pub trait Registers {
 
     /// An x64 SSE register that may be written.
     type WriteXmm: AsReg;
+
+    /// An x64 AVX-512 mask register that may be read.
+    type ReadKmask: AsReg;
+
+    /// An x64 AVX-512 mask register that may be read and written.
+    type ReadWriteKmask: AsReg;
+
+    /// An x64 AVX-512 mask register that may be written.
+    type WriteKmask: AsReg;
 }
 
 /// Describe how to interact with an external register type.
@@ -182,6 +191,13 @@ pub trait RegisterVisitor<R: Registers> {
     /// Visit a read-only fixed SSE register; this register can be modified
     /// in-place but must emit as the hardware encoding `enc`.
     fn fixed_write_xmm(&mut self, reg: &mut R::WriteXmm, enc: u8);
+
+    /// Visit a read-only AVX-512 mask register.
+    fn read_kmask(&mut self, reg: &mut R::ReadKmask);
+    /// Visit a read-write AVX-512 mask register.
+    fn read_write_kmask(&mut self, reg: &mut R::ReadWriteKmask);
+    /// Visit a write-only AVX-512 mask register.
+    fn write_kmask(&mut self, reg: &mut R::WriteKmask);
 
     /// Visit the registers in an [`Amode`].
     ///

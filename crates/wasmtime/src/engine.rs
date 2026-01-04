@@ -569,10 +569,13 @@ information about this check\
             "has_bmi1" => "bmi1",
             "has_bmi2" => "bmi2",
             "has_avx512bitalg" => "avx512bitalg",
+            "has_avx512bw" => "avx512bw",
             "has_avx512dq" => "avx512dq",
             "has_avx512f" => "avx512f",
             "has_avx512vl" => "avx512vl",
             "has_avx512vbmi" => "avx512vbmi",
+            "has_avx512vpopcntdq" => "avx512vpopcntdq",
+            "has_avx512cd" => "avx512cd",
             "has_lzcnt" => "lzcnt",
 
             // pulley features

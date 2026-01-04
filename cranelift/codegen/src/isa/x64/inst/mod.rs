@@ -11,13 +11,13 @@ use crate::isa::{CallConv, FunctionAlignment};
 use crate::{CodegenError, CodegenResult, settings};
 use crate::{machinst::*, trace};
 use alloc::boxed::Box;
-use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::fmt::{self, Write};
 use core::slice;
 use cranelift_assembler_x64 as asm;
 use smallvec::{SmallVec, smallvec};
+use std::fmt::{self, Write};
+use std::string::{String, ToString};
 
 pub mod args;
 mod emit;
@@ -28,6 +28,11 @@ pub mod external;
 pub mod regs;
 mod stack_switch;
 pub mod unwind;
+
+// =================================================================
+// AVX-512 Extensions
+// =================================================================
+pub mod avx512;
 
 use args::*;
 
@@ -60,7 +65,7 @@ pub struct ReturnCallInfo<T> {
 fn inst_size_test() {
     // This test will help with unintentionally growing the size
     // of the Inst enum.
-    assert_eq!(48, core::mem::size_of::<Inst>());
+    assert_eq!(48, std::mem::size_of::<Inst>());
 }
 
 impl Inst {
@@ -112,6 +117,14 @@ impl Inst {
             | Inst::SequencePoint => true,
 
             Inst::Atomic128RmwSeq { .. } | Inst::Atomic128XchgSeq { .. } => emit_info.cmpxchg16b(),
+
+            // AVX-512 instructions (manual implementations) require AVX-512F
+            Inst::Avx512KmovKK { .. }
+            | Inst::Avx512KmovLoad { .. }
+            | Inst::Avx512KmovStore { .. }
+            | Inst::Avx512Gather { .. }
+            | Inst::Avx512Scatter { .. }
+            | Inst::Avx512Vp2Intersect { .. } => emit_info.avx512f(),
 
             Inst::External { inst } => inst.is_available(&emit_info),
         }
@@ -321,11 +334,21 @@ impl Inst {
                     _ if (ty.is_float() || ty.is_vector()) && ty.bits() == 128 => {
                         asm::inst::movdqu_a::new(to_reg, from_addr).into()
                     }
+                    // AVX-512: 512-bit vector load
+                    _ if ty.is_vector() && ty.bits() == 512 => {
+                        asm::inst::vmovdqu32_zl::new(to_reg, from_addr).into()
+                    }
                     _ => unimplemented!("unable to load type: {}", ty),
                 };
                 Inst::External { inst }
             }
-            RegClass::Vector => unreachable!(),
+            RegClass::Vector => {
+                // K-register load from memory
+                return Inst::Avx512KmovLoad {
+                    dst: to_reg,
+                    addr: from_addr.into(),
+                };
+            }
         }
     }
 
@@ -361,10 +384,20 @@ impl Inst {
                     _ if (ty.is_float() || ty.is_vector()) && ty.bits() == 128 => {
                         asm::inst::movdqu_b::new(to_addr, from_reg).into()
                     }
+                    // AVX-512: 512-bit vector store
+                    _ if ty.is_vector() && ty.bits() == 512 => {
+                        asm::inst::vmovdqu32_zs::new(to_addr, from_reg).into()
+                    }
                     _ => unimplemented!("unable to store type: {}", ty),
                 }
             }
-            RegClass::Vector => unreachable!(),
+            RegClass::Vector => {
+                // K-register store to memory
+                return Inst::Avx512KmovStore {
+                    src: from_reg,
+                    addr: to_addr,
+                };
+            }
         };
         Inst::External { inst }
     }
@@ -835,6 +868,76 @@ impl PrettyPrint for Inst {
                 format!("sequence_point")
             }
 
+            // AVX-512 instruction pretty printing (manual implementations only)
+            Inst::Avx512KmovKK { dst, src } => {
+                let dst = pretty_print_reg(dst.to_reg(), 8);
+                let src = pretty_print_reg(*src, 8);
+                format!("kmovq {dst}, {src}")
+            }
+
+            Inst::Avx512KmovLoad { dst, addr } => {
+                let dst = pretty_print_reg(dst.to_reg(), 8);
+                let addr = addr.pretty_print(8);
+                format!("kmovq {dst}, {addr}")
+            }
+
+            Inst::Avx512KmovStore { src, addr } => {
+                let src = pretty_print_reg(*src, 8);
+                let addr = addr.pretty_print(8);
+                format!("kmovq {addr}, {src}")
+            }
+
+            Inst::Avx512Gather {
+                op,
+                dst,
+                base,
+                index,
+                scale,
+                disp,
+                mask,
+            } => {
+                let dst = pretty_print_reg(dst.to_reg(), 64);
+                let base = pretty_print_reg(*base, 8);
+                let index = pretty_print_reg(*index, 64);
+                let mask = pretty_print_reg(*mask, 8);
+                format!(
+                    "{} {dst} {{{mask}}}, [{base} + {index}*{scale} + {disp}]",
+                    op.name()
+                )
+            }
+
+            Inst::Avx512Scatter {
+                op,
+                src,
+                base,
+                index,
+                scale,
+                disp,
+                mask,
+            } => {
+                let src = pretty_print_reg(*src, 64);
+                let base = pretty_print_reg(*base, 8);
+                let index = pretty_print_reg(*index, 64);
+                let mask = pretty_print_reg(*mask, 8);
+                format!(
+                    "{} [{base} + {index}*{scale} + {disp}] {{{mask}}}, {src}",
+                    op.name()
+                )
+            }
+
+            Inst::Avx512Vp2Intersect {
+                op,
+                dst_k,
+                src1,
+                src2,
+            } => {
+                let dst = pretty_print_reg(dst_k.to_reg(), 8);
+                let src1 = pretty_print_reg(*src1, 64);
+                let src2 = src2.pretty_print(64);
+                let op_name = op.name();
+                format!("{op_name} {src1}, {src2}, {dst}")
+            }
+
             Inst::External { inst } => {
                 format!("{inst}")
             }
@@ -1202,6 +1305,56 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
 
         Inst::SequencePoint { .. } => {}
 
+        // AVX-512 register allocation (manual implementations only)
+        Inst::Avx512KmovKK { dst, src } => {
+            collector.reg_def(dst);
+            collector.reg_use(src);
+        }
+
+        Inst::Avx512KmovLoad { dst, addr } => {
+            collector.reg_def(dst);
+            addr.get_operands(collector);
+        }
+
+        Inst::Avx512KmovStore { src, addr } => {
+            collector.reg_use(src);
+            addr.get_operands(collector);
+        }
+
+        Inst::Avx512Gather {
+            dst,
+            base,
+            index,
+            mask,
+            ..
+        } => {
+            collector.reg_def(dst);
+            collector.reg_use(base);
+            collector.reg_use(index);
+            collector.reg_use(mask);
+        }
+
+        Inst::Avx512Scatter {
+            src,
+            base,
+            index,
+            mask,
+            ..
+        } => {
+            collector.reg_use(src);
+            collector.reg_use(base);
+            collector.reg_use(index);
+            collector.reg_use(mask);
+        }
+
+        Inst::Avx512Vp2Intersect {
+            dst_k, src1, src2, ..
+        } => {
+            collector.reg_def(dst_k);
+            collector.reg_use(src1);
+            src2.get_operands(collector);
+        }
+
         Inst::External { inst } => {
             inst.visit(&mut external::RegallocVisitor { collector });
         }
@@ -1375,16 +1528,25 @@ impl MachInst for Inst {
                     _ if (ty.is_float() || ty.is_vector()) && ty.bits() <= 128 => {
                         asm::inst::movdqa_a::new(dst_reg, src_reg).into()
                     }
+                    _ if ty.is_vector() && ty.bits() == 512 => {
+                        asm::inst::vmovdqu32_zl::new(dst_reg, src_reg).into()
+                    }
                     _ => unimplemented!("unable to move type: {}", ty),
                 }
             }
-            RegClass::Vector => unreachable!(),
+            RegClass::Vector => {
+                // K-register to k-register move
+                return Inst::Avx512KmovKK {
+                    dst: dst_reg,
+                    src: src_reg,
+                };
+            }
         };
         Inst::External { inst }
     }
 
     fn gen_nop(preferred_size: usize) -> Inst {
-        Inst::nop(core::cmp::min(preferred_size, 9) as u8)
+        Inst::nop(std::cmp::min(preferred_size, 9) as u8)
     }
 
     fn gen_nop_units() -> Vec<Vec<u8>> {
@@ -1414,6 +1576,16 @@ impl MachInst for Inst {
                     slice::from_ref(&types[ty.bytes().ilog2() as usize - 1]),
                 ))
             }
+            // AVX-512: Support 256-bit vectors (YMM registers)
+            _ if ty.is_vector() && ty.bits() == 256 => {
+                // Use I8X16 as the canonical type since all XMM/YMM/ZMM use RegClass::Float
+                Ok((&[RegClass::Float], &[types::I8X16]))
+            }
+            // AVX-512: Support 512-bit vectors (ZMM registers) for AVX-512
+            _ if ty.is_vector() && ty.bits() == 512 => {
+                // Use I8X16 as the canonical type since all XMM/YMM/ZMM use RegClass::Float
+                Ok((&[RegClass::Float], &[types::I8X16]))
+            }
             _ => Err(CodegenError::Unsupported(format!(
                 "Unexpected SSA-value type: {ty}"
             ))),
@@ -1424,7 +1596,8 @@ impl MachInst for Inst {
         match rc {
             RegClass::Float => types::I8X16,
             RegClass::Int => types::I64,
-            RegClass::Vector => unreachable!(),
+            // K-registers are 64-bit
+            RegClass::Vector => types::I64,
         }
     }
 
@@ -1578,6 +1751,24 @@ impl asm::AvailableFeatures for &EmitInfo {
 
     fn avx512vbmi(&self) -> bool {
         self.isa_flags.has_avx512vbmi()
+    }
+
+    fn avx512bw(&self) -> bool {
+        self.isa_flags.has_avx512bw()
+    }
+
+    fn avx512cd(&self) -> bool {
+        self.isa_flags.has_avx512cd()
+    }
+
+    fn avx512vpopcntdq(&self) -> bool {
+        self.isa_flags.has_avx512vpopcntdq()
+    }
+
+    fn avx512vnni(&self) -> bool {
+        // AVX-512 VNNI is not yet exposed as an ISA flag, return false for now
+        // TODO: Add has_avx512vnni() to ISA flags
+        false
     }
 }
 

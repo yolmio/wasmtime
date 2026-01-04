@@ -4766,6 +4766,7 @@ dependencies = [
 name = "wasmtime-internal-cache"
 version = "41.0.0"
 dependencies = [
+ "anyhow",
  "base64",
  "directories-next",
  "env_logger 0.11.5",
@@ -4778,7 +4779,6 @@ dependencies = [
  "sha2",
  "tempfile",
  "toml",
- "wasmtime-environ",
  "windows-sys 0.61.2",
  "zstd 0.13.0",
 ]
@@ -4914,11 +4914,11 @@ version = "41.0.0"
 name = "wasmtime-internal-unwinder"
 version = "41.0.0"
 dependencies = [
+ "anyhow",
  "cfg-if",
  "cranelift-codegen",
  "log",
  "object 0.37.3",
- "wasmtime-environ",
 ]
 
 [[package]]

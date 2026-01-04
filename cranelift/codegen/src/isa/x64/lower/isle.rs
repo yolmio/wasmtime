@@ -15,17 +15,19 @@ use crate::ir::{
     BlockCall, Inst, InstructionData, LibCall, MemFlags, Opcode, TrapCode, Value, ValueList,
 };
 use crate::isa::x64::X64Backend;
-use crate::isa::x64::inst::{ReturnCallInfo, args::*, regs};
+use crate::isa::x64::inst::{ReturnCallInfo, args::OptionReg, args::*, avx512, regs};
+// Re-export Avx512 types for ISLE generated code (only types still used by manual implementations)
 use crate::isa::x64::lower::{InsnInput, emit_vm_call};
 use crate::machinst::isle::*;
 use crate::machinst::{
     ArgPair, CallArgList, CallInfo, CallRetList, InstOutput, MachInst, VCodeConstant,
     VCodeConstantData,
 };
-use alloc::boxed::Box;
 use alloc::vec::Vec;
+pub(crate) use avx512::{Avx512Cond, GatherOp, ScatterOp, Vp2IntersectOp};
 use cranelift_assembler_x64 as asm;
 use regalloc2::PReg;
+use std::boxed::Box;
 
 /// Type representing out-of-line data for calls. This type optional because the
 /// call instruction is also used by Winch to emit calls, but the
@@ -280,6 +282,82 @@ impl Context for IsleContext<'_, '_, MInst, X64Backend> {
     }
 
     #[inline]
+    fn has_avx512vpopcntdq(&mut self) -> bool {
+        self.backend.x64_flags.has_avx512vpopcntdq()
+    }
+
+    #[inline]
+    fn has_avx512bw(&mut self) -> bool {
+        self.backend.x64_flags.has_avx512bw()
+    }
+
+    #[inline]
+    fn has_avx512cd(&mut self) -> bool {
+        self.backend.x64_flags.has_avx512cd()
+    }
+
+    // =========================================================================
+    // AVX-512 Helpers
+    // =========================================================================
+
+    /// Constructor for OptionMaskReg::None (no masking)
+    #[inline]
+    fn option_mask_reg_none(&mut self) -> OptionMaskReg {
+        None
+    }
+
+    /// Convert Xmm to RegMem for Avx512 instructions
+    #[inline]
+    fn x64_512_xmm_to_reg_mem(&mut self, xmm: Xmm) -> RegMem {
+        RegMem::reg(xmm.to_reg())
+    }
+
+    /// Convert XmmMem to RegMem for Avx512 instructions
+    #[inline]
+    fn x64_512_xmm_mem_to_reg_mem(&mut self, xmm_mem: &XmmMem) -> RegMem {
+        xmm_mem.clone().into()
+    }
+
+    /// Convert a Reg to an OptionMaskReg for Avx512 masked operations.
+    /// The reg should be a k-register (k1-k7).
+    #[inline]
+    fn x64_512_mask_reg(&mut self, reg: Reg) -> OptionMaskReg {
+        Mask::new(reg)
+    }
+
+    /// Convert Offset32 to i32 for gather/scatter displacement
+    #[inline]
+    fn i32_from_offset32(&mut self, offset: Offset32) -> i32 {
+        offset.into()
+    }
+
+    /// Convert Uimm8 to u8 for scale factors
+    #[inline]
+    fn uimm8_value(&mut self, imm: Uimm8) -> u8 {
+        imm
+    }
+
+    /// Convert a Reg to Some(Reg) for OptionReg
+    #[inline]
+    fn some_reg(&mut self, reg: Reg) -> OptionReg {
+        Some(reg)
+    }
+
+    /// Get the k1 register as a Reg for AVX-512 mask operations.
+    /// k1 is used as a pinned mask register for gather/scatter operations.
+    #[inline]
+    fn k1_reg(&mut self) -> Reg {
+        crate::isa::x64::inst::regs::k1()
+    }
+
+    /// Convert a Reg to a WritableReg.
+    /// This is used for pinned registers like k1 that are modified in place.
+    #[inline]
+    fn reg_to_writable_reg(&mut self, reg: Reg) -> Writable<Reg> {
+        Writable::from_reg(reg)
+    }
+
+    #[inline]
     fn has_lzcnt(&mut self) -> bool {
         self.backend.x64_flags.has_lzcnt()
     }
@@ -512,6 +590,31 @@ impl Context for IsleContext<'_, '_, MInst, X64Backend> {
     }
 
     #[inline]
+    fn temp_writable_kmask(&mut self) -> WritableMask {
+        self.lower_ctx.temp_writable_kmask()
+    }
+
+    #[inline]
+    fn kmask_to_reg(&mut self, k: Mask) -> Reg {
+        k.into()
+    }
+
+    #[inline]
+    fn reg_to_kmask(&mut self, r: Reg) -> Mask {
+        Mask::unwrap_new(r)
+    }
+
+    #[inline]
+    fn writable_kmask_to_writable_reg(&mut self, wk: WritableMask) -> Writable<Reg> {
+        wk.to_writable_reg()
+    }
+
+    #[inline]
+    fn writable_kmask_to_kmask(&mut self, wk: WritableMask) -> Mask {
+        wk.to_reg()
+    }
+
+    #[inline]
     fn reg_to_reg_mem_imm(&mut self, reg: Reg) -> RegMemImm {
         RegMemImm::Reg { reg }
     }
@@ -614,6 +717,11 @@ impl Context for IsleContext<'_, '_, MInst, X64Backend> {
             CC::NZ => Some(*cc),
             _ => None,
         }
+    }
+
+    #[inline]
+    fn avx512_cond_to_u8(&mut self, cond: &Avx512Cond) -> u8 {
+        *cond as u8
     }
 
     #[inline]

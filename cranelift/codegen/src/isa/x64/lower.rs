@@ -16,7 +16,8 @@ use crate::machinst::lower::*;
 use crate::machinst::*;
 use crate::result::CodegenResult;
 use crate::settings::Flags;
-use alloc::boxed::Box;
+use std::boxed::Box;
+use regalloc2::RegClass;
 use target_lexicon::Triple;
 
 /// Identifier for a particular input of an instruction.
@@ -38,6 +39,12 @@ impl Lower<'_, Inst> {
     #[inline]
     pub fn temp_writable_xmm(&mut self) -> WritableXmm {
         WritableXmm::from_writable_reg(self.alloc_tmp(types::F64).only_reg().unwrap()).unwrap()
+    }
+
+    #[inline]
+    pub fn temp_writable_kmask(&mut self) -> WritableMask {
+        let reg = self.alloc_tmp_regclass(RegClass::Vector, types::I64);
+        WritableMask::from_writable_reg(reg).unwrap()
     }
 }
 

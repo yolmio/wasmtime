@@ -11,7 +11,7 @@ use synthetic::ModuleSyntheticUnit;
 use thiserror::Error;
 use wasmtime_environ::error::Error;
 use wasmtime_environ::{
-    DefinedFuncIndex, ModuleTranslation, PrimaryMap, StaticModuleIndex, Tunables, prelude::*,
+    DefinedFuncIndex, ModuleTranslation, PrimaryMap, StaticModuleIndex, Tunables,
 };
 
 pub use address_transform::AddressTransform;
@@ -54,11 +54,11 @@ pub(crate) struct DebugInputContext<'a> {
 fn load_dwp<'data>(
     translation: ModuleTranslation<'data>,
     buffer: &'data [u8],
-) -> Result<DwarfPackage<gimli::EndianSlice<'data, gimli::LittleEndian>>> {
+) -> wasmtime_environ::error::Result<DwarfPackage<gimli::EndianSlice<'data, gimli::LittleEndian>>> {
     let endian_slice = gimli::EndianSlice::new(buffer, LittleEndian);
 
     let dwarf_package = DwarfPackage::load(
-        |id| -> Result<_> {
+        |id| -> wasmtime_environ::error::Result<_> {
             let slice = match id {
                 gimli::SectionId::DebugAbbrev => {
                     translation.debuginfo.dwarf.debug_abbrev.reader().slice()
