@@ -14,7 +14,6 @@ workspace = true
 
 [dependencies]
 cfg-if = { workspace = true }
-wasmtime-environ = { workspace = true }
 
 [target.'cfg(target_os = "windows")'.dependencies.windows-sys]
 workspace = true
