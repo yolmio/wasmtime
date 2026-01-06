@@ -2015,6 +2015,18 @@
       (if-let true (has_avx512bw))
       (x64_512_vpcmpgtb b a))
 
+;; I8X64 signed greater-than or equal - invert (a < b)
+(rule 10 (lower (icmp (IntCC.SignedGreaterThanOrEqual) a @ (value_type (multi_lane 8 64)) b))
+      (if-let true (has_avx512bw))
+      (let ((checked Xmm (x64_512_vpcmpgtb b a)))
+           (x64_512_vpternlogd checked checked checked 0x55)))
+
+;; I8X64 signed less-than or equal - invert (a > b)
+(rule 10 (lower (icmp (IntCC.SignedLessThanOrEqual) a @ (value_type (multi_lane 8 64)) b))
+      (if-let true (has_avx512bw))
+      (let ((checked Xmm (x64_512_vpcmpgtb a b)))
+           (x64_512_vpternlogd checked checked checked 0x55)))
+
 ;; SSE `sgt`
 
 (rule (lower (icmp (IntCC.SignedGreaterThan) a @ (value_type (ty_vec128 ty)) b))
@@ -5075,8 +5087,68 @@
 
 ;; Rules for `uunarrow` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-;; TODO: currently we only lower a special case of `uunarrow` needed to support
-;; the translation of wasm's i32x4.trunc_sat_f64x2_u_zero operation.
+;; Unsigned-narrowing for integer vectors.
+
+(decl uunarrow_fixup_i16x8 (Xmm) Xmm)
+(rule (uunarrow_fixup_i16x8 val)
+      (let (
+          (sign Xmm (x64_psraw val (xmi_imm 15)))
+          (mask Xmm (x64_movdqu_load (emit_u128_le_const 0x7f00_7f00_7f00_7f00_7f00_7f00_7f00_7f00)))
+          (adjust Xmm (x64_pand sign mask))
+          (nonneg Xmm (x64_pandn sign val))
+        )
+        (x64_por nonneg adjust)))
+
+(rule 1 (lower (has_type $I8X16 (uunarrow a @ (value_type $I16X8) b)))
+      (if-let true (has_pminu $I16X8))
+      (let (
+          (max Xmm (x64_movdqu_load (emit_u128_le_const 0x00ff_00ff_00ff_00ff_00ff_00ff_00ff_00ff)))
+          (a Xmm (x64_pminu $I16X8 a max))
+          (b Xmm (x64_pminu $I16X8 b max))
+        )
+        (x64_packuswb a b)))
+
+(rule (lower (has_type $I8X16 (uunarrow a @ (value_type $I16X8) b)))
+      (let (
+          (a Xmm (uunarrow_fixup_i16x8 a))
+          (b Xmm (uunarrow_fixup_i16x8 b))
+        )
+        (x64_packuswb a b)))
+
+(rule 1 (lower (has_type $I16X8 (uunarrow a @ (value_type $I32X4) b)))
+        (if-let true (has_sse41))
+        (let (
+            (max Xmm (x64_movdqu_load (emit_u128_le_const 0x0000ffff_0000ffff_0000ffff_0000ffff)))
+            (a Xmm (x64_pminu $I32X4 a max))
+            (b Xmm (x64_pminu $I32X4 b max))
+          )
+          (x64_packusdw a b)))
+
+(decl uunarrow_i32x4_lanes_to_low_u16_lanes (Xmm) Xmm)
+(rule (uunarrow_i32x4_lanes_to_low_u16_lanes val)
+      (let (
+          (bias Xmm (x64_movdqu_load (emit_u128_le_const 0x80000000_80000000_80000000_80000000)))
+          (max Xmm (x64_movdqu_load (emit_u128_le_const 0x0000ffff_0000ffff_0000ffff_0000ffff)))
+          (val_bias Xmm (x64_pxor val bias))
+          (max_bias Xmm (x64_pxor max bias))
+          (cmp Xmm (x64_pcmpgtd_a_or_avx max_bias val_bias))
+          (valid_lanes Xmm (x64_pand val cmp))
+          (clamped_lanes Xmm (x64_pandn cmp max))
+          (val Xmm (x64_por valid_lanes clamped_lanes))
+          (val Xmm (x64_pshuflw val 0b00_00_10_00))
+          (val Xmm (x64_pshufhw val 0b00_00_10_00))
+        )
+        (x64_pshufd val 0b00_00_10_00)))
+
+(rule (lower (has_type $I16X8 (uunarrow a @ (value_type $I32X4) b)))
+      (let (
+          (a Xmm (uunarrow_i32x4_lanes_to_low_u16_lanes a))
+          (b Xmm (uunarrow_i32x4_lanes_to_low_u16_lanes b))
+        )
+        (x64_punpcklqdq a b)))
+
+;; Special-case `uunarrow` needed to support the translation of wasm's
+;; i32x4.trunc_sat_f64x2_u_zero operation.
 ;; https://github.com/bytecodealliance/wasmtime/issues/4791
 ;;
 ;; y = i32x4.trunc_sat_f64x2_u_zero(x) is lowered to:
@@ -5087,8 +5159,8 @@
 ;; ROUNDPD xmm_y, xmm_y, 0x0B
 ;; ADDPD xmm_y, [wasm_f64x2_splat(0x1.0p+52)]
 ;; SHUFPS xmm_y, xmm_xmp, 0x88
-(rule (lower (uunarrow (fcvt_to_uint_sat src @ (value_type $F64X2))
-                       (vconst (u128_from_constant 0))))
+(rule (lower (has_type $I32X4 (uunarrow (fcvt_to_uint_sat src @ (value_type $F64X2))
+                                        (vconst (u128_from_constant 0)))))
       (let ((src Xmm src)
 
             ;; MOVAPD xmm_y, xmm_x

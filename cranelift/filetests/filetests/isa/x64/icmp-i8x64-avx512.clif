@@ -1,0 +1,28 @@
+test compile
+target x86_64 has_avx512f has_avx512bw
+
+function %icmp_eq_i8x64(i8x64, i8x64) -> i8x64 {
+block0(v0: i8x64, v1: i8x64):
+  v2 = icmp eq v0, v1
+  return v2
+}
+
+; check: vpcmpeqb
+
+function %icmp_sge_i8x64(i8x64, i8x64) -> i8x64 {
+block0(v0: i8x64, v1: i8x64):
+  v2 = icmp sge v0, v1
+  return v2
+}
+
+; check: vpcmpgtb
+; check: vpternlogd
+
+function %icmp_sle_i8x64(i8x64, i8x64) -> i8x64 {
+block0(v0: i8x64, v1: i8x64):
+  v2 = icmp sle v0, v1
+  return v2
+}
+
+; check: vpcmpgtb
+; check: vpternlogd
