@@ -13,7 +13,7 @@ version = "0.128.0"
 workspace = true
 
 [dependencies]
-codespan-reporting = { version = "0.11.1", optional = true }
+codespan-reporting = { version = "0.13.1", optional = true }
 log = { workspace = true, optional = true }
 
 [dev-dependencies]

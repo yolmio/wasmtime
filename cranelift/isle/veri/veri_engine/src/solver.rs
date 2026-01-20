@@ -1633,7 +1633,8 @@ pub fn run_solver(
 
     let mut solver = easy_smt::ContextBuilder::new()
         .replay_file(Some(std::fs::File::create("dynamic_widths.smt2").unwrap()))
-        .solver("z3", ["-smt2", "-in"])
+        .solver("z3")
+        .solver_args(["-smt2", "-in"])
         .build()
         .unwrap();
 
@@ -1823,7 +1824,8 @@ pub fn run_solver_with_static_widths(
     // Declare variables again, this time with all static widths
     let mut solver = easy_smt::ContextBuilder::new()
         .replay_file(Some(std::fs::File::create("static_widths.smt2").unwrap()))
-        .solver("z3", ["-smt2", "-in"])
+        .solver("z3")
+        .solver_args(["-smt2", "-in"])
         .build()
         .unwrap();
     solver
