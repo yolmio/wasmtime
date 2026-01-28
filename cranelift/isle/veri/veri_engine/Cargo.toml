@@ -21,7 +21,7 @@ cranelift-isle = { path = "../../isle" }
 cranelift-codegen = { path = "../../../codegen", features = ["all-arch"] }
 cranelift-codegen-meta = { path = "../../../codegen/meta" }
 veri_ir = { path = "../veri_ir" }
-easy-smt = "0.2.2"
+easy-smt = "0.3.2"
 clap = { workspace = true }
 itertools = { workspace = true }
 log = { workspace = true }
@@ -29,5 +29,5 @@ env_logger = { workspace = true }
 anyhow = { workspace = true }
 
 [dev-dependencies]
-strum = "0.24.0"
-strum_macros = "0.24.0"
+strum = "0.27.2"
+strum_macros = "0.27.2"
