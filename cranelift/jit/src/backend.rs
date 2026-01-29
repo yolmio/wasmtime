@@ -194,6 +194,57 @@ impl JITModule {
         self.memory.free_memory();
     }
 
+    /// Consume this module and return a [`FrozenJITModule`] that retains only
+    /// the executable memory and function/data pointers. All compiler state
+    /// (ISA, symbol tables, relocation records, declarations) is dropped.
+    ///
+    /// The module must have been finalized via [`finalize_definitions`] before
+    /// calling this method.
+    ///
+    /// [`finalize_definitions`]: JITModule::finalize_definitions
+    pub fn freeze(self) -> FrozenJITModule {
+        let JITModule {
+            compiled_functions,
+            compiled_data_objects,
+            memory,
+            // Drop everything else
+            isa: _,
+            symbols: _,
+            lookup_symbols: _,
+            libcall_names: _,
+            declarations: _,
+            code_ranges: _,
+            functions_to_finalize: _,
+            data_objects_to_finalize: _,
+        } = self;
+
+        let mut frozen_fns: SecondaryMap<FuncId, Option<FrozenBlob>> = SecondaryMap::new();
+        for (id, blob) in compiled_functions.iter() {
+            if let Some(b) = blob {
+                frozen_fns[id] = Some(FrozenBlob {
+                    ptr: b.ptr,
+                    size: b.size,
+                });
+            }
+        }
+
+        let mut frozen_data: SecondaryMap<DataId, Option<FrozenBlob>> = SecondaryMap::new();
+        for (id, blob) in compiled_data_objects.iter() {
+            if let Some(b) = blob {
+                frozen_data[id] = Some(FrozenBlob {
+                    ptr: b.ptr,
+                    size: b.size,
+                });
+            }
+        }
+
+        FrozenJITModule {
+            memory,
+            compiled_functions: frozen_fns,
+            compiled_data_objects: frozen_data,
+        }
+    }
+
     fn lookup_symbol(&self, name: &str) -> Option<*const u8> {
         match self.symbols.borrow_mut().entry(name.to_owned()) {
             std::collections::hash_map::Entry::Occupied(occ) => Some(occ.get().0),
@@ -710,6 +761,52 @@ impl Module for JITModule {
 
     fn clear_signature(&self, sig: &mut ir::Signature) {
         sig.clear(self.isa().default_call_conv());
+    }
+}
+
+/// A frozen JIT module that retains only executable memory and function/data
+/// pointers. All compiler infrastructure has been dropped.
+///
+/// Created by calling [`JITModule::freeze`] after [`JITModule::finalize_definitions`].
+pub struct FrozenJITModule {
+    memory: Box<dyn JITMemoryProvider + Send>,
+    compiled_functions: SecondaryMap<FuncId, Option<FrozenBlob>>,
+    compiled_data_objects: SecondaryMap<DataId, Option<FrozenBlob>>,
+}
+
+#[derive(Clone)]
+struct FrozenBlob {
+    ptr: *mut u8,
+    size: usize,
+}
+
+unsafe impl Send for FrozenJITModule {}
+unsafe impl Sync for FrozenJITModule {}
+
+impl FrozenJITModule {
+    /// Returns the address of a finalized function.
+    pub fn get_finalized_function(&self, func_id: FuncId) -> *const u8 {
+        self.compiled_functions[func_id]
+            .as_ref()
+            .expect("function must be compiled before it can be finalized")
+            .ptr
+    }
+
+    /// Returns the address and size of a finalized data object.
+    pub fn get_finalized_data(&self, data_id: DataId) -> (*const u8, usize) {
+        let blob = self.compiled_data_objects[data_id]
+            .as_ref()
+            .expect("data object must be compiled before it can be finalized");
+        (blob.ptr, blob.size)
+    }
+
+    /// Free memory allocated for code and data segments.
+    ///
+    /// # Safety
+    ///
+    /// Invalidates all function pointers obtained from this module.
+    pub unsafe fn free_memory(mut self) {
+        self.memory.free_memory();
     }
 }
 
