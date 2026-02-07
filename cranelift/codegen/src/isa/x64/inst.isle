@@ -5256,6 +5256,35 @@
 (rule (x64_512_vpsravq data shift) (x64_vpsravq_z data shift))
 
 ;; =============================================================================
+;; Uniform Shift helpers (VPSLLD/Q, VPSRLD/Q, VPSRAD/Q)
+;; Shift all elements by the same amount (from low bits of XMM register)
+;; =============================================================================
+
+;; VPSLLD - uniform left shift 32-bit elements
+(decl x64_512_vpslld (Xmm XmmMem) Xmm)
+(rule (x64_512_vpslld data shift) (x64_vpslld_z data shift))
+
+;; VPSLLQ - uniform left shift 64-bit elements
+(decl x64_512_vpsllq (Xmm XmmMem) Xmm)
+(rule (x64_512_vpsllq data shift) (x64_vpsllq_z data shift))
+
+;; VPSRLD - uniform logical right shift 32-bit elements
+(decl x64_512_vpsrld (Xmm XmmMem) Xmm)
+(rule (x64_512_vpsrld data shift) (x64_vpsrld_z data shift))
+
+;; VPSRLQ - uniform logical right shift 64-bit elements
+(decl x64_512_vpsrlq (Xmm XmmMem) Xmm)
+(rule (x64_512_vpsrlq data shift) (x64_vpsrlq_z data shift))
+
+;; VPSRAD - uniform arithmetic right shift 32-bit elements
+(decl x64_512_vpsrad (Xmm XmmMem) Xmm)
+(rule (x64_512_vpsrad data shift) (x64_vpsrad_z data shift))
+
+;; VPSRAQ - uniform arithmetic right shift 64-bit elements
+(decl x64_512_vpsraq (Xmm XmmMem) Xmm)
+(rule (x64_512_vpsraq data shift) (x64_vpsraq_z data shift))
+
+;; =============================================================================
 ;; Variable Rotate helpers (VPROLVD/Q)
 ;; =============================================================================
 
