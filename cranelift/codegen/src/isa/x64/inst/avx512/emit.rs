@@ -1673,6 +1673,8 @@ pub fn emit_x64_512_ternlog_inst(
     };
 
     let dst_enc = dst.to_reg().to_real_reg().unwrap().hw_enc();
+    // Used in debug_assert below to verify src1 is tied to dst
+    #[cfg_attr(not(debug_assertions), allow(unused_variables))]
     let src1_enc = src1.to_real_reg().unwrap().hw_enc();
     // Note: src2 goes in the vvvv field of EVEX
     let src2_enc = src2.to_real_reg().unwrap().hw_enc();

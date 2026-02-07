@@ -945,38 +945,50 @@
       (x64_512_vpermq (put_in_xmm indices) (put_in_xmm_mem data)))
 
 ;; =============================================================================
-;; 512-bit Variable Shift (VPSLLV, VPSRLV, VPSRAV)
+;; 512-bit Uniform Shift (VPSLLD/Q, VPSRLD/Q, VPSRAD/Q)
 ;; =============================================================================
+;; CLIF's ishl/ushr/sshr take a scalar shift amount, so we use the uniform
+;; shift instructions (VPSLLD, VPSLLQ, etc.) which shift all elements by the
+;; same amount from the low bits of an XMM register.
+;;
+;; NOTE: The per-element variable shift instructions (VPSLLVD, VPSRLVQ, etc.)
+;; are ONLY used for the x86_vpsllv/x86_vpsrlv/x86_vpsrav intrinsics below.
 
-;; I32X16 variable left shift -> VPSLLVD
+;; I32X16 uniform left shift -> VPSLLD
 (rule 17 (lower (has_type (multi_lane 32 16) (ishl data shift)))
       (if-let true (has_avx512f))
-      (x64_512_vpsllvd (put_in_xmm data) (put_in_xmm_mem shift)))
+      (let ((masked Gpr (x64_and $I64 shift (RegMemImm.Imm 31))))
+        (x64_512_vpslld (put_in_xmm data) (xmm_to_xmm_mem (x64_movd_to_xmm masked)))))
 
-;; I64X8 variable left shift -> VPSLLVQ
+;; I64X8 uniform left shift -> VPSLLQ
 (rule 17 (lower (has_type (multi_lane 64 8) (ishl data shift)))
       (if-let true (has_avx512f))
-      (x64_512_vpsllvq (put_in_xmm data) (put_in_xmm_mem shift)))
+      (let ((masked Gpr (x64_and $I64 shift (RegMemImm.Imm 63))))
+        (x64_512_vpsllq (put_in_xmm data) (xmm_to_xmm_mem (x64_movd_to_xmm masked)))))
 
-;; I32X16 variable unsigned right shift -> VPSRLVD
+;; I32X16 uniform unsigned right shift -> VPSRLD
 (rule 17 (lower (has_type (multi_lane 32 16) (ushr data shift)))
       (if-let true (has_avx512f))
-      (x64_512_vpsrlvd (put_in_xmm data) (put_in_xmm_mem shift)))
+      (let ((masked Gpr (x64_and $I64 shift (RegMemImm.Imm 31))))
+        (x64_512_vpsrld (put_in_xmm data) (xmm_to_xmm_mem (x64_movd_to_xmm masked)))))
 
-;; I64X8 variable unsigned right shift -> VPSRLVQ
+;; I64X8 uniform unsigned right shift -> VPSRLQ
 (rule 17 (lower (has_type (multi_lane 64 8) (ushr data shift)))
       (if-let true (has_avx512f))
-      (x64_512_vpsrlvq (put_in_xmm data) (put_in_xmm_mem shift)))
+      (let ((masked Gpr (x64_and $I64 shift (RegMemImm.Imm 63))))
+        (x64_512_vpsrlq (put_in_xmm data) (xmm_to_xmm_mem (x64_movd_to_xmm masked)))))
 
-;; I32X16 variable signed right shift -> VPSRAVD
+;; I32X16 uniform signed right shift -> VPSRAD
 (rule 17 (lower (has_type (multi_lane 32 16) (sshr data shift)))
       (if-let true (has_avx512f))
-      (x64_512_vpsravd (put_in_xmm data) (put_in_xmm_mem shift)))
+      (let ((masked Gpr (x64_and $I64 shift (RegMemImm.Imm 31))))
+        (x64_512_vpsrad (put_in_xmm data) (xmm_to_xmm_mem (x64_movd_to_xmm masked)))))
 
-;; I64X8 variable signed right shift -> VPSRAVQ
+;; I64X8 uniform signed right shift -> VPSRAQ
 (rule 17 (lower (has_type (multi_lane 64 8) (sshr data shift)))
       (if-let true (has_avx512f))
-      (x64_512_vpsravq (put_in_xmm data) (put_in_xmm_mem shift)))
+      (let ((masked Gpr (x64_and $I64 shift (RegMemImm.Imm 63))))
+        (x64_512_vpsraq (put_in_xmm data) (xmm_to_xmm_mem (x64_movd_to_xmm masked)))))
 
 ;; =============================================================================
 ;; 512-bit Rotate Left
