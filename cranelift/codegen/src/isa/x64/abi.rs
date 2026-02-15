@@ -9,6 +9,7 @@ use crate::isa::{CallConv, unwind::UnwindInst, x64::inst::*, x64::settings as x6
 use crate::machinst::abi::*;
 use crate::machinst::*;
 use crate::settings;
+use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::vec::Vec;
 use args::*;

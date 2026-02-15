@@ -1,5 +1,6 @@
 //! Memory operands to instructions.
 
+use alloc::format;
 use alloc::string::{String, ToString};
 
 use crate::api::{AsReg, CodeSink, Constant, KnownOffset, Label, TrapCode};

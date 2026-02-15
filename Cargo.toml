@@ -68,8 +68,9 @@ wasmtime-core = { path = "crates/core", version = "=43.0.0", package = 'wasmtime
 wasmtime-jit-icache-coherence = { path = "crates/jit-icache-coherence", version = "=43.0.0", package = 'wasmtime-internal-jit-icache-coherence' }
 wasmtime-unwinder = { path = "crates/unwinder", version = "=43.0.0", package = 'wasmtime-internal-unwinder' }
 
-pulley-interpreter = { path = 'pulley', version = "=43.0.0" }
-pulley-macros = { path = 'pulley/macros', version = "=43.0.0" }
+# Pulley is optional; since we don't include the pulley source tree, reference
+# the published crates.io version so workspace deps resolve.
+pulley-interpreter = { version = "41.0.3" }
 
 # Cranelift crates in this workspace
 cranelift-assembler-x64 = { path = "cranelift/assembler-x64", version = "0.130.0" }
@@ -89,9 +90,6 @@ cranelift-bitset = { path = "cranelift/bitset", version = "0.130.0" }
 cranelift-control = { path = "cranelift/control", version = "0.130.0", default-features = false }
 cranelift-srcgen = { path = "cranelift/srcgen", version = "0.130.0" }
 cranelift = { path = "cranelift/umbrella", version = "0.130.0" }
-
-# Internal crates not published to crates.io used in testing, builds, etc
-pulley-interpreter-fuzz = { path = 'pulley/fuzz' }
 
 # Bytecode Alliance maintained dependencies:
 # ---------------------------
@@ -191,7 +189,7 @@ rustc-hash = "2.1.1"
 libtest-mimic = "0.8.1"
 semver = { version = "1.0.27", default-features = false }
 ittapi = "0.4.0"
-libm = "0.2.15"
+libm = "0.2.16"
 tokio-rustls = "0.25.0"
 rustls = "0.22.0"
 tokio-native-tls = "0.3.1"

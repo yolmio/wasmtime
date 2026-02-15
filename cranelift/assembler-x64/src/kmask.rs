@@ -8,6 +8,9 @@
 //!
 //! See [`Kmask`] for the register type.
 
+use alloc::borrow::ToOwned;
+use alloc::string::String;
+
 use crate::{AsReg, CodeSink, rex::encode_modrm};
 
 /// An x64 AVX-512 mask register (e.g., `%k1`).

@@ -221,8 +221,8 @@ impl JITModule {
         for (id, blob) in compiled_functions.iter() {
             if let Some(b) = blob {
                 frozen_fns[id] = Some(FrozenBlob {
-                    ptr: b.ptr,
-                    size: b.size,
+                    ptr: b.ptr(),
+                    size: b.size(),
                 });
             }
         }
@@ -231,8 +231,8 @@ impl JITModule {
         for (id, blob) in compiled_data_objects.iter() {
             if let Some(b) = blob {
                 frozen_data[id] = Some(FrozenBlob {
-                    ptr: b.ptr,
-                    size: b.size,
+                    ptr: b.ptr(),
+                    size: b.size(),
                 });
             }
         }
@@ -719,7 +719,7 @@ pub struct FrozenJITModule {
 
 #[derive(Clone)]
 struct FrozenBlob {
-    ptr: *mut u8,
+    ptr: *const u8,
     size: usize,
 }
 
