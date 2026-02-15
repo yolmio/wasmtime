@@ -1379,18 +1379,16 @@ const fn create_reg_env_systemv(enable_pinned_reg: bool, enable_simd32: bool) ->
             .with(preg(regs::xmm31()));
     }
 
-    // K-mask registers for AVX-512: k1 is reserved, allocate k2-k7.
-    let kmask_preferred = if enable_simd32 {
-        PRegSet::empty()
-            .with(preg(regs::k2()))
-            .with(preg(regs::k3()))
-            .with(preg(regs::k4()))
-            .with(preg(regs::k5()))
-            .with(preg(regs::k6()))
-            .with(preg(regs::k7()))
-    } else {
-        PRegSet::empty()
-    };
+    // K-mask registers for AVX-512: k0 is hardwired "no mask", k1 is reserved;
+    // always include k2-k7 so AVX-512 instructions can allocate them even
+    // without enable_simd32 (which only controls xmm16-31).
+    let kmask_preferred = PRegSet::empty()
+        .with(preg(regs::k2()))
+        .with(preg(regs::k3()))
+        .with(preg(regs::k4()))
+        .with(preg(regs::k5()))
+        .with(preg(regs::k6()))
+        .with(preg(regs::k7()));
 
     let mut env = MachineEnv {
         preferred_regs_by_class: [
