@@ -7129,10 +7129,10 @@ fn test_i32x16_gather_dd() {
     #[repr(C, align(64))]
     struct DataArray([i32; 64]);
     let data = DataArray([
-        100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115,
-        116, 117, 118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131,
-        132, 133, 134, 135, 136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147,
-        148, 149, 150, 151, 152, 153, 154, 155, 156, 157, 158, 159, 160, 161, 162, 163,
+        100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117,
+        118, 119, 120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135,
+        136, 137, 138, 139, 140, 141, 142, 143, 144, 145, 146, 147, 148, 149, 150, 151, 152, 153,
+        154, 155, 156, 157, 158, 159, 160, 161, 162, 163,
     ]);
 
     // Indices are byte offsets: element 0, 2, 4, 6, ... (even elements)
@@ -8924,7 +8924,9 @@ fn test_i32x16_icmp_signed_ge_platform_vec_pattern() {
     let func: BinaryI32x16Fn = unsafe { mem::transmute(code) };
 
     // Test with the exact data pattern from platform-vec: [10,20,30,...,160] >= 100
-    let data = I32x16::new([10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160]);
+    let data = I32x16::new([
+        10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160,
+    ]);
     let constant = I32x16::splat(100);
     let mut result = I32x16::splat(0);
 
@@ -8938,11 +8940,22 @@ fn test_i32x16_icmp_signed_ge_platform_vec_pattern() {
         let actual_lane = result.0[i];
         let expected_lane = expected.0[i];
         assert_eq!(
-            actual_lane, expected_lane,
+            actual_lane,
+            expected_lane,
             "Lane {} mismatch: data[{}]={} >= 100 should be {}, got {}",
-            i, i, data.0[i],
-            if expected_lane == -1 { "TRUE (-1)" } else { "FALSE (0)" },
-            if actual_lane == -1 { "TRUE (-1)" } else { "FALSE (0)" }
+            i,
+            i,
+            data.0[i],
+            if expected_lane == -1 {
+                "TRUE (-1)"
+            } else {
+                "FALSE (0)"
+            },
+            if actual_lane == -1 {
+                "TRUE (-1)"
+            } else {
+                "FALSE (0)"
+            }
         );
     }
 
@@ -9008,9 +9021,7 @@ fn test_i32x16_icmp_extractlane_all_lanes() {
         builder.ins().return_(&[lane4]);
     }
 
-    module
-        .define_function(func_id, &mut ctx)
-        .expect("define");
+    module.define_function(func_id, &mut ctx).expect("define");
     module.clear_context(&mut ctx);
     module.finalize_definitions().expect("finalize");
 
@@ -9019,16 +9030,19 @@ fn test_i32x16_icmp_extractlane_all_lanes() {
 
     // Test case 1: lane 4 should match (both have 4 at position 4)
     let a = I32x16::new([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
-    let b = I32x16::new([99, 99, 99, 99, 4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99]);
+    let b = I32x16::new([
+        99, 99, 99, 99, 4, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+    ]);
     let result = func(&a, &b);
     assert_eq!(result, -1, "Lane 4 should match: a[4]=4 == b[4]=4");
 
     // Test case 2: lane 4 should NOT match
     let a = I32x16::new([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
-    let b = I32x16::new([99, 99, 99, 99, 5, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99]);
+    let b = I32x16::new([
+        99, 99, 99, 99, 5, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99, 99,
+    ]);
     let result = func(&a, &b);
     assert_eq!(result, 0, "Lane 4 should NOT match: a[4]=4 != b[4]=5");
-
 }
 
 /// Test unsigned integer comparisons at boundaries
@@ -9230,8 +9244,8 @@ fn test_i32x16_vconst() {
     // lane 8-11: 256, 512, 1024, 2048 (bits 8-11)
     // lane 12-15: 4096, 8192, 16384, 32768 (bits 12-15)
     let bit_masks: [u32; 16] = [
-        1, 2, 4, 8,           // lanes 0-3
-        16, 32, 64, 128,      // lanes 4-7
+        1, 2, 4, 8, // lanes 0-3
+        16, 32, 64, 128, // lanes 4-7
         256, 512, 1024, 2048, // lanes 8-11
         4096, 8192, 16384, 32768, // lanes 12-15
     ];
@@ -9249,8 +9263,7 @@ fn test_i32x16_vconst() {
         .declare_function("i32x16_vconst", Linkage::Local, &sig)
         .expect("Failed to declare function");
 
-    compiler.ctx.func =
-        Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
+    compiler.ctx.func = Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
 
     {
         let mut builder = FunctionBuilder::new(&mut compiler.ctx.func, &mut compiler.func_ctx);
@@ -9269,7 +9282,9 @@ fn test_i32x16_vconst() {
         let vec_const = builder.ins().vconst(I32X16, const_handle);
 
         // Store result
-        builder.ins().store(MemFlags::trusted(), vec_const, dst_ptr, 0);
+        builder
+            .ins()
+            .store(MemFlags::trusted(), vec_const, dst_ptr, 0);
         builder.ins().return_(&[]);
 
         builder.seal_all_blocks();
@@ -9347,8 +9362,7 @@ fn test_i64x8_vconst() {
         .declare_function("i64x8_vconst", Linkage::Local, &sig)
         .expect("Failed to declare function");
 
-    compiler.ctx.func =
-        Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
+    compiler.ctx.func = Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
 
     {
         let mut builder = FunctionBuilder::new(&mut compiler.ctx.func, &mut compiler.func_ctx);
@@ -9367,7 +9381,9 @@ fn test_i64x8_vconst() {
         let vec_const = builder.ins().vconst(I64X8, const_handle);
 
         // Store result
-        builder.ins().store(MemFlags::trusted(), vec_const, dst_ptr, 0);
+        builder
+            .ins()
+            .store(MemFlags::trusted(), vec_const, dst_ptr, 0);
         builder.ins().return_(&[]);
 
         builder.seal_all_blocks();
@@ -9442,8 +9458,7 @@ fn test_i32x16_vhigh_bits_all_lanes() {
         .declare_function("i32x16_vhigh_bits", Linkage::Local, &sig)
         .unwrap();
 
-    compiler.ctx.func =
-        Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
+    compiler.ctx.func = Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
 
     {
         let mut builder = FunctionBuilder::new(&mut compiler.ctx.func, &mut compiler.func_ctx);
@@ -9585,8 +9600,7 @@ fn test_i32x16_store_load_roundtrip() {
         .declare_function("i32x16_roundtrip", Linkage::Local, &sig)
         .unwrap();
 
-    compiler.ctx.func =
-        Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
+    compiler.ctx.func = Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
 
     {
         let mut builder = FunctionBuilder::new(&mut compiler.ctx.func, &mut compiler.func_ctx);
@@ -9604,19 +9618,26 @@ fn test_i32x16_store_load_roundtrip() {
             .load(I32X16, MemFlags::trusted(), input_ptr, 0);
 
         // Create a stack slot and store/reload (this is what platform-vec does)
-        let stack_slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 64, 6,
-        ));
+        let stack_slot =
+            builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                64,
+                6,
+            ));
         let stack_ptr = builder.ins().stack_addr(I64, stack_slot, 0);
 
         // Store the I32X16 to stack
         builder.ins().store(MemFlags::trusted(), vec, stack_ptr, 0);
 
         // Load it back as I32X16
-        let reloaded = builder.ins().load(I32X16, MemFlags::trusted(), stack_ptr, 0);
+        let reloaded = builder
+            .ins()
+            .load(I32X16, MemFlags::trusted(), stack_ptr, 0);
 
         // Store to output
-        builder.ins().store(MemFlags::trusted(), reloaded, output_ptr, 0);
+        builder
+            .ins()
+            .store(MemFlags::trusted(), reloaded, output_ptr, 0);
         builder.ins().return_(&[]);
 
         builder.seal_all_blocks();
@@ -9683,8 +9704,8 @@ fn test_i32x16_load_splat_icmp_vhigh_bits_pipeline() {
     let mut sig = compiler.module.make_signature();
     let ptr_type = compiler.module.target_config().pointer_type();
     sig.params.push(AbiParam::new(ptr_type)); // column data ptr
-    sig.params.push(AbiParam::new(I32));      // constant to compare against
-    sig.returns.push(AbiParam::new(I32));     // mask bits
+    sig.params.push(AbiParam::new(I32)); // constant to compare against
+    sig.returns.push(AbiParam::new(I32)); // mask bits
     sig.call_conv = CallConv::SystemV;
 
     let func_id = compiler
@@ -9692,8 +9713,7 @@ fn test_i32x16_load_splat_icmp_vhigh_bits_pipeline() {
         .declare_function("i32x16_pipeline", Linkage::Local, &sig)
         .unwrap();
 
-    compiler.ctx.func =
-        Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
+    compiler.ctx.func = Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
 
     {
         let mut builder = FunctionBuilder::new(&mut compiler.ctx.func, &mut compiler.func_ctx);
@@ -9712,52 +9732,84 @@ fn test_i32x16_load_splat_icmp_vhigh_bits_pipeline() {
 
         // Step 2: Spill/reload column (workaround from platform-vec)
         let col_slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 64, 6,
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            64,
+            6,
         ));
         let col_slot_ptr = builder.ins().stack_addr(I64, col_slot, 0);
-        builder.ins().store(MemFlags::trusted(), col_vec, col_slot_ptr, 0);
-        let col_reloaded = builder.ins().load(I32X16, MemFlags::trusted(), col_slot_ptr, 0);
+        builder
+            .ins()
+            .store(MemFlags::trusted(), col_vec, col_slot_ptr, 0);
+        let col_reloaded = builder
+            .ins()
+            .load(I32X16, MemFlags::trusted(), col_slot_ptr, 0);
 
         // Step 3: Splat constant to I32X16
         let const_vec = builder.ins().splat(I32X16, compare_val);
 
         // Step 4: Spill/reload splat (workaround from platform-vec)
-        let splat_slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 64, 6,
-        ));
+        let splat_slot =
+            builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                64,
+                6,
+            ));
         let splat_slot_ptr = builder.ins().stack_addr(I64, splat_slot, 0);
-        builder.ins().store(MemFlags::trusted(), const_vec, splat_slot_ptr, 0);
-        let const_reloaded = builder.ins().load(I32X16, MemFlags::trusted(), splat_slot_ptr, 0);
+        builder
+            .ins()
+            .store(MemFlags::trusted(), const_vec, splat_slot_ptr, 0);
+        let const_reloaded = builder
+            .ins()
+            .load(I32X16, MemFlags::trusted(), splat_slot_ptr, 0);
 
         // Step 5: Compare using chunked I32X4 (workaround from platform-vec)
         let l_slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 64, 6,
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            64,
+            6,
         ));
         let r_slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 64, 6,
+            cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+            64,
+            6,
         ));
-        let result_slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 64, 6,
-        ));
+        let result_slot =
+            builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                64,
+                6,
+            ));
 
         let l_ptr = builder.ins().stack_addr(I64, l_slot, 0);
         let r_ptr = builder.ins().stack_addr(I64, r_slot, 0);
         let result_ptr = builder.ins().stack_addr(I64, result_slot, 0);
 
-        builder.ins().store(MemFlags::trusted(), col_reloaded, l_ptr, 0);
-        builder.ins().store(MemFlags::trusted(), const_reloaded, r_ptr, 0);
+        builder
+            .ins()
+            .store(MemFlags::trusted(), col_reloaded, l_ptr, 0);
+        builder
+            .ins()
+            .store(MemFlags::trusted(), const_reloaded, r_ptr, 0);
 
         // Compare in 4 chunks of I32X4
         for chunk in 0..4i32 {
             let offset = chunk * 16;
-            let l_chunk = builder.ins().load(I32X4, MemFlags::trusted(), l_ptr, offset);
-            let r_chunk = builder.ins().load(I32X4, MemFlags::trusted(), r_ptr, offset);
+            let l_chunk = builder
+                .ins()
+                .load(I32X4, MemFlags::trusted(), l_ptr, offset);
+            let r_chunk = builder
+                .ins()
+                .load(I32X4, MemFlags::trusted(), r_ptr, offset);
             let cmp_chunk = builder.ins().icmp(IntCC::Equal, l_chunk, r_chunk);
-            builder.ins().store(MemFlags::trusted(), cmp_chunk, result_ptr, offset);
+            builder
+                .ins()
+                .store(MemFlags::trusted(), cmp_chunk, result_ptr, offset);
         }
 
         // Load result as I32X16
-        let mask = builder.ins().load(I32X16, MemFlags::trusted(), result_ptr, 0);
+        let mask = builder
+            .ins()
+            .load(I32X16, MemFlags::trusted(), result_ptr, 0);
 
         // Step 6: Extract high bits
         let mask_bits = builder.ins().vhigh_bits(I32, mask);
@@ -9849,8 +9901,7 @@ fn test_i32x16_band_with_control_flow() {
         .declare_function("i32x16_band_cf", Linkage::Local, &sig)
         .unwrap();
 
-    compiler.ctx.func =
-        Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
+    compiler.ctx.func = Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
 
     {
         let mut builder = FunctionBuilder::new(&mut compiler.ctx.func, &mut compiler.func_ctx);
@@ -9872,9 +9923,12 @@ fn test_i32x16_band_with_control_flow() {
         let is_null = builder.ins().icmp(IntCC::Equal, mask2_ptr, zero_ptr);
 
         // Create result stack slot
-        let result_slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-            cranelift_codegen::ir::StackSlotKind::ExplicitSlot, 64, 6,
-        ));
+        let result_slot =
+            builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                64,
+                6,
+            ));
         let result_ptr = builder.ins().stack_addr(I64, result_slot, 0);
 
         // Branching logic
@@ -9882,7 +9936,9 @@ fn test_i32x16_band_with_control_flow() {
         let not_null_block = builder.create_block();
         let merge_block = builder.create_block();
 
-        builder.ins().brif(is_null, null_block, &[], not_null_block, &[]);
+        builder
+            .ins()
+            .brif(is_null, null_block, &[], not_null_block, &[]);
 
         // Null case: use all ones
         builder.switch_to_block(null_block);
@@ -9891,7 +9947,9 @@ fn test_i32x16_band_with_control_flow() {
             let neg_one = builder.ins().iconst(I32, -1);
             builder.ins().splat(I32X16, neg_one)
         };
-        builder.ins().store(MemFlags::trusted(), all_ones, result_ptr, 0);
+        builder
+            .ins()
+            .store(MemFlags::trusted(), all_ones, result_ptr, 0);
         builder.ins().jump(merge_block, &[]);
 
         // Not null case: load mask2
@@ -9900,14 +9958,18 @@ fn test_i32x16_band_with_control_flow() {
         let mask2 = builder
             .ins()
             .load(I32X16, MemFlags::trusted(), mask2_ptr, 0);
-        builder.ins().store(MemFlags::trusted(), mask2, result_ptr, 0);
+        builder
+            .ins()
+            .store(MemFlags::trusted(), mask2, result_ptr, 0);
         builder.ins().jump(merge_block, &[]);
 
         // Merge and band
         builder.switch_to_block(merge_block);
         builder.seal_block(merge_block);
 
-        let loaded_mask2 = builder.ins().load(I32X16, MemFlags::trusted(), result_ptr, 0);
+        let loaded_mask2 = builder
+            .ins()
+            .load(I32X16, MemFlags::trusted(), result_ptr, 0);
         let banded = builder.ins().band(mask1, loaded_mask2);
         let bits = builder.ins().vhigh_bits(I32, banded);
 
@@ -9992,7 +10054,7 @@ fn test_vpbroadcastd_evex_register_encoding() {
     // This test compiles a function that uses multiple splat operations to
     // force register allocation to use high registers (16-31).
     // If the EVEX encoding is wrong, this will produce incorrect results or crash.
-    
+
     let mut sig = compiler.module.make_signature();
     sig.params.push(AbiParam::new(I32)); // input value
     let ptr_type = compiler.module.target_config().pointer_type();
@@ -10004,8 +10066,7 @@ fn test_vpbroadcastd_evex_register_encoding() {
         .declare_function("vpbroadcastd_high_regs", Linkage::Local, &sig)
         .unwrap();
 
-    compiler.ctx.func =
-        Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
+    compiler.ctx.func = Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
 
     {
         let mut builder = FunctionBuilder::new(&mut compiler.ctx.func, &mut compiler.func_ctx);
@@ -10079,13 +10140,18 @@ fn test_vpbroadcastd_evex_register_encoding() {
     // Expected: input + 1 + 2 + 3 + 4 + 5 + 6 + 7 = input + 28
     let expected_value = input + 28;
     let expected = I32x16::splat(expected_value);
-    
-    println!("Input: {}, Expected value per lane: {}", input, expected_value);
+
+    println!(
+        "Input: {}, Expected value per lane: {}",
+        input, expected_value
+    );
     println!("Result: {:?}", result.0);
-    
-    assert_eq!(result, expected, 
+
+    assert_eq!(
+        result, expected,
         "VPBROADCASTD with high registers failed: expected splat({}), got {:?}",
-        expected_value, result.0);
+        expected_value, result.0
+    );
 }
 
 #[test]
@@ -10107,8 +10173,7 @@ fn test_vpbroadcastq_evex_register_encoding() {
         .declare_function("vpbroadcastq_high_regs", Linkage::Local, &sig)
         .unwrap();
 
-    compiler.ctx.func =
-        Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
+    compiler.ctx.func = Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
 
     {
         let mut builder = FunctionBuilder::new(&mut compiler.ctx.func, &mut compiler.func_ctx);
@@ -10180,11 +10245,16 @@ fn test_vpbroadcastq_evex_register_encoding() {
     // Expected: input + 1 + 2 + 3 + 4 + 5 + 6 + 7 = input + 28
     let expected_value = input + 28;
     let expected = I64x8::splat(expected_value);
-    
-    println!("Input: {}, Expected value per lane: {}", input, expected_value);
+
+    println!(
+        "Input: {}, Expected value per lane: {}",
+        input, expected_value
+    );
     println!("Result: {:?}", result.0);
-    
-    assert_eq!(result, expected, 
+
+    assert_eq!(
+        result, expected,
         "VPBROADCASTQ with high registers failed: expected splat({}), got {:?}",
-        expected_value, result.0);
+        expected_value, result.0
+    );
 }

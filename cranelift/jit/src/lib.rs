@@ -10,9 +10,10 @@ mod backend;
 mod compiled_blob;
 mod memory;
 
-pub use crate::backend::{FrozenJITModule, JITBuilder, JITModule};
+pub use crate::backend::{FrozenJITModule, FrozenJITModuleStats, JITBuilder, JITModule};
 pub use crate::memory::{
-    ArenaMemoryProvider, BranchProtection, JITMemoryProvider, SystemMemoryProvider,
+    ArenaMemoryProvider, BranchProtection, JITMemoryProvider, JITMemorySegmentStats,
+    JITMemoryStats, SystemMemoryProvider,
 };
 
 /// Version number of this crate.

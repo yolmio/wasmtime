@@ -4,7 +4,9 @@ use std::ptr;
 
 use cranelift_module::ModuleResult;
 
-use super::{BranchProtection, JITMemoryKind, JITMemoryProvider};
+use super::{
+    BranchProtection, JITMemoryKind, JITMemoryProvider, JITMemorySegmentStats, JITMemoryStats,
+};
 
 fn align_up(addr: usize, align: usize) -> usize {
     debug_assert!(align.is_power_of_two());
@@ -206,6 +208,34 @@ impl ArenaMemoryProvider {
     }
 }
 
+fn add_segment_stats(stats: &mut JITMemorySegmentStats, segment: &Segment) {
+    stats.segments += 1;
+    stats.mapped_bytes += segment.len;
+    stats.used_bytes += segment.position;
+}
+
+impl ArenaMemoryProvider {
+    fn stats_snapshot(&self) -> JITMemoryStats {
+        let mut stats = JITMemoryStats {
+            reserved_bytes: self.size,
+            ..JITMemoryStats::default()
+        };
+        for segment in &self.segments {
+            stats.mapped_bytes += segment.len;
+            stats.used_bytes += segment.position;
+            match segment.target_prot {
+                region::Protection::READ_EXECUTE => {
+                    add_segment_stats(&mut stats.executable, segment)
+                }
+                region::Protection::READ => add_segment_stats(&mut stats.readonly, segment),
+                region::Protection::READ_WRITE => add_segment_stats(&mut stats.writable, segment),
+                _ => {}
+            }
+        }
+        stats
+    }
+}
+
 impl Drop for ArenaMemoryProvider {
     fn drop(&mut self) {
         if self.ptr == ptr::null_mut() {
@@ -240,6 +270,10 @@ impl JITMemoryProvider for ArenaMemoryProvider {
     fn finalize(&mut self, branch_protection: BranchProtection) -> ModuleResult<()> {
         self.finalize(branch_protection);
         Ok(())
+    }
+
+    fn stats(&self) -> JITMemoryStats {
+        self.stats_snapshot()
     }
 }
 

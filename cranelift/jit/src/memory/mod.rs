@@ -16,6 +16,34 @@ pub enum BranchProtection {
     BTI,
 }
 
+/// Segment-level memory statistics for a JIT memory provider.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JITMemorySegmentStats {
+    /// Number of segments in this protection class.
+    pub segments: usize,
+    /// Total bytes mapped for this protection class.
+    pub mapped_bytes: usize,
+    /// Total bytes actually used within mapped segments for this protection class.
+    pub used_bytes: usize,
+}
+
+/// Aggregate memory statistics for a JIT memory provider.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct JITMemoryStats {
+    /// Total address space reserved by the provider.
+    pub reserved_bytes: usize,
+    /// Total bytes mapped/allocated by the provider.
+    pub mapped_bytes: usize,
+    /// Total bytes actually written/assigned to code or data.
+    pub used_bytes: usize,
+    /// Executable segment statistics.
+    pub executable: JITMemorySegmentStats,
+    /// Writable segment statistics.
+    pub writable: JITMemorySegmentStats,
+    /// Read-only segment statistics.
+    pub readonly: JITMemorySegmentStats,
+}
+
 pub enum JITMemoryKind {
     /// Allocate memory that will be executable once finalized.
     Executable,
@@ -27,13 +55,15 @@ pub enum JITMemoryKind {
 
 /// A provider of memory for the JIT.
 pub trait JITMemoryProvider {
-    /// Allocate memory
+    /// Allocate memory.
     fn allocate(&mut self, size: usize, align: u64, kind: JITMemoryKind) -> io::Result<*mut u8>;
 
     /// Free the memory region.
     unsafe fn free_memory(&mut self);
     /// Finalize the memory region and apply memory protections.
     fn finalize(&mut self, branch_protection: BranchProtection) -> ModuleResult<()>;
+    /// Return provider memory statistics.
+    fn stats(&self) -> JITMemoryStats;
 }
 
 /// Marks the memory region as readable and executable.

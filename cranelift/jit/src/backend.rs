@@ -2,7 +2,9 @@
 
 use crate::{
     compiled_blob::CompiledBlob,
-    memory::{BranchProtection, JITMemoryKind, JITMemoryProvider, SystemMemoryProvider},
+    memory::{
+        BranchProtection, JITMemoryKind, JITMemoryProvider, JITMemoryStats, SystemMemoryProvider,
+    },
 };
 use cranelift_codegen::binemit::Reloc;
 use cranelift_codegen::isa::{OwnedTargetIsa, TargetIsa};
@@ -162,6 +164,21 @@ impl JITBuilder {
 struct SendWrapper<T>(T);
 unsafe impl<T> Send for SendWrapper<T> {}
 
+/// Memory statistics for a frozen JIT module.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FrozenJITModuleStats {
+    /// Memory-provider statistics.
+    pub memory: JITMemoryStats,
+    /// Number of finalized functions retained by the module.
+    pub function_count: usize,
+    /// Total bytes of finalized function bodies retained by the module.
+    pub function_bytes: usize,
+    /// Number of finalized data objects retained by the module.
+    pub data_count: usize,
+    /// Total bytes of finalized data objects retained by the module.
+    pub data_bytes: usize,
+}
+
 /// A `JITModule` implements `Module` and emits code and data into memory where it can be
 /// directly called and accessed.
 ///
@@ -217,9 +234,13 @@ impl JITModule {
             data_objects_to_finalize: _,
         } = self;
 
+        let mut function_count = 0;
+        let mut function_bytes = 0;
         let mut frozen_fns: SecondaryMap<FuncId, Option<FrozenBlob>> = SecondaryMap::new();
         for (id, blob) in compiled_functions.iter() {
             if let Some(b) = blob {
+                function_count += 1;
+                function_bytes += b.size();
                 frozen_fns[id] = Some(FrozenBlob {
                     ptr: b.ptr(),
                     size: b.size(),
@@ -227,9 +248,13 @@ impl JITModule {
             }
         }
 
+        let mut data_count = 0;
+        let mut data_bytes = 0;
         let mut frozen_data: SecondaryMap<DataId, Option<FrozenBlob>> = SecondaryMap::new();
         for (id, blob) in compiled_data_objects.iter() {
             if let Some(b) = blob {
+                data_count += 1;
+                data_bytes += b.size();
                 frozen_data[id] = Some(FrozenBlob {
                     ptr: b.ptr(),
                     size: b.size(),
@@ -237,10 +262,19 @@ impl JITModule {
             }
         }
 
+        let stats = FrozenJITModuleStats {
+            memory: memory.stats(),
+            function_count,
+            function_bytes,
+            data_count,
+            data_bytes,
+        };
+
         FrozenJITModule {
             memory,
             compiled_functions: frozen_fns,
             compiled_data_objects: frozen_data,
+            stats,
         }
     }
 
@@ -715,6 +749,7 @@ pub struct FrozenJITModule {
     memory: Box<dyn JITMemoryProvider + Send>,
     compiled_functions: SecondaryMap<FuncId, Option<FrozenBlob>>,
     compiled_data_objects: SecondaryMap<DataId, Option<FrozenBlob>>,
+    stats: FrozenJITModuleStats,
 }
 
 #[derive(Clone)]
@@ -741,6 +776,11 @@ impl FrozenJITModule {
             .as_ref()
             .expect("data object must be compiled before it can be finalized");
         (blob.ptr, blob.size)
+    }
+
+    /// Return retained-memory statistics for this module.
+    pub fn stats(&self) -> FrozenJITModuleStats {
+        self.stats
     }
 
     /// Free memory allocated for code and data segments.

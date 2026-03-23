@@ -9,7 +9,9 @@ use std::io;
 use std::mem;
 use std::ptr;
 
-use super::{BranchProtection, JITMemoryKind, JITMemoryProvider};
+use super::{
+    BranchProtection, JITMemoryKind, JITMemoryProvider, JITMemorySegmentStats, JITMemoryStats,
+};
 
 /// A simple struct consisting of a pointer and length.
 struct PtrLen {
@@ -18,6 +20,7 @@ struct PtrLen {
 
     ptr: *mut u8,
     len: usize,
+    used: usize,
 }
 
 impl PtrLen {
@@ -29,6 +32,7 @@ impl PtrLen {
 
             ptr: ptr::null_mut(),
             len: 0,
+            used: 0,
         }
     }
 
@@ -44,6 +48,7 @@ impl PtrLen {
                 ptr: mmap.as_mut_ptr(),
                 map: Some(mmap),
                 len: alloc_size,
+                used: 0,
             }
         })
     }
@@ -61,6 +66,7 @@ impl PtrLen {
             Ok(Self {
                 ptr,
                 len: alloc_size,
+                used: 0,
             })
         } else {
             Err(io::Error::from(io::ErrorKind::OutOfMemory))
@@ -86,6 +92,7 @@ impl PtrLen {
             Ok(Self {
                 ptr: ptr as *mut u8,
                 len: region::page::ceil(size as *const ()) as usize,
+                used: 0,
             })
         } else {
             Err(io::Error::last_os_error())
@@ -135,6 +142,7 @@ impl Memory {
     }
 
     fn finish_current(&mut self) {
+        self.current.used = self.position;
         self.allocations
             .push(mem::replace(&mut self.current, PtrLen::new()));
         self.position = 0;
@@ -218,6 +226,26 @@ impl Memory {
     }
 }
 
+impl Memory {
+    fn stats_snapshot(&self) -> JITMemorySegmentStats {
+        let mut stats = JITMemorySegmentStats::default();
+        for alloc in &self.allocations {
+            if alloc.len == 0 {
+                continue;
+            }
+            stats.segments += 1;
+            stats.mapped_bytes += alloc.len;
+            stats.used_bytes += alloc.used;
+        }
+        if self.current.len != 0 {
+            stats.segments += 1;
+            stats.mapped_bytes += self.current.len;
+            stats.used_bytes += self.position;
+        }
+        stats
+    }
+}
+
 impl Drop for Memory {
     fn drop(&mut self) {
         // leak memory to guarantee validity of function pointers
@@ -267,6 +295,20 @@ impl JITMemoryProvider for SystemMemoryProvider {
             JITMemoryKind::Executable => self.code.allocate(size, align),
             JITMemoryKind::Writable => self.writable.allocate(size, align),
             JITMemoryKind::ReadOnly => self.readonly.allocate(size, align),
+        }
+    }
+
+    fn stats(&self) -> JITMemoryStats {
+        let executable = self.code.stats_snapshot();
+        let readonly = self.readonly.stats_snapshot();
+        let writable = self.writable.stats_snapshot();
+        JITMemoryStats {
+            reserved_bytes: executable.mapped_bytes + readonly.mapped_bytes + writable.mapped_bytes,
+            mapped_bytes: executable.mapped_bytes + readonly.mapped_bytes + writable.mapped_bytes,
+            used_bytes: executable.used_bytes + readonly.used_bytes + writable.used_bytes,
+            executable,
+            writable,
+            readonly,
         }
     }
 }
