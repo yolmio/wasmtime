@@ -7173,6 +7173,128 @@ fn test_i32x16_gather_dd() {
     assert_eq!(result.0[15], 130, "Gathered element 30");
 }
 
+fn assert_no_vpgather_index_dest_alias(disasm: &str) {
+    for line in disasm.lines() {
+        let Some(gather_pos) = line.find("vpgather") else {
+            continue;
+        };
+        let gather = &line[gather_pos..];
+        let Some((_, operands)) = gather.split_once(' ') else {
+            continue;
+        };
+        let Some((dest, rest)) = operands.split_once(',') else {
+            continue;
+        };
+        let Some(index_start) = rest.find("%xmm") else {
+            continue;
+        };
+        let index = rest[index_start..]
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '%'))
+            .next()
+            .expect("split always returns the first segment");
+        let dest_reg = dest
+            .trim()
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '%'))
+            .next()
+            .expect("split always returns the first segment");
+        assert_ne!(
+            dest_reg, index,
+            "gather destination and VSIB index must be distinct: {line}"
+        );
+    }
+}
+
+#[test]
+fn test_i32x16_gather_dd_dest_index_distinct_under_pressure() {
+    let Some(mut compiler) = TestCompiler::new() else {
+        println!("Skipping: AVX-512 not available");
+        return;
+    };
+
+    let mut sig = compiler.module.make_signature();
+    let ptr_type = compiler.module.target_config().pointer_type();
+    sig.params.push(AbiParam::new(ptr_type)); // bitset base ptr
+    sig.params.push(AbiParam::new(I32X16)); // candidate byte offsets
+    sig.params.push(AbiParam::new(I32X16)); // active lane fallback vector
+    sig.params.push(AbiParam::new(I64)); // scalar shift amount source
+    sig.params.push(AbiParam::new(ptr_type)); // output ptr
+    sig.call_conv = CallConv::SystemV;
+
+    let func_id = compiler
+        .module
+        .declare_function("i32x16_gather_dd_pressure", Linkage::Local, &sig)
+        .unwrap();
+
+    compiler.ctx.func = Function::with_name_signature(UserFuncName::user(0, func_id.as_u32()), sig);
+
+    {
+        let mut builder = FunctionBuilder::new(&mut compiler.ctx.func, &mut compiler.func_ctx);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+
+        let params = builder.block_params(block).to_vec();
+        let base_ptr = params[0];
+        let candidate_offsets = params[1];
+        let fallback = params[2];
+        let shift_source = params[3];
+        let out_ptr = params[4];
+
+        let low5 = builder.ins().band_imm(shift_source, 0x1f);
+        let low5_i32 = builder.ins().ireduce(I32, low5);
+        let shifted_offsets = builder.ins().ushr(candidate_offsets, low5_i32);
+
+        let mask_bytes = [0xff; 64];
+        let mask_const_data = ConstantData::from(&mask_bytes[..]);
+        let mask_const_handle = builder.func.dfg.constants.insert(mask_const_data);
+        let mask_const = builder.ins().vconst(I32X16, mask_const_handle);
+        let blended = builder
+            .ins()
+            .bitselect(shifted_offsets, fallback, mask_const);
+        let gather_indices = builder.ins().ushr_imm(blended, 3);
+
+        let gathered = builder.ins().x86_simd_gather(
+            I32X16,
+            MemFlags::trusted(),
+            base_ptr,
+            gather_indices,
+            1u8,
+            0i32,
+        );
+
+        let post_mask_bytes = [0x0f; 64];
+        let post_mask_data = ConstantData::from(&post_mask_bytes[..]);
+        let post_mask_handle = builder.func.dfg.constants.insert(post_mask_data);
+        let post_mask = builder.ins().vconst(I32X16, post_mask_handle);
+        let gathered_masked = builder.ins().band(gathered, post_mask);
+        let original_still_live = builder.ins().band(candidate_offsets, post_mask);
+        let result = builder.ins().bor(gathered_masked, original_still_live);
+
+        builder.ins().store(MemFlags::trusted(), result, out_ptr, 0);
+        builder.ins().return_(&[]);
+
+        builder.seal_all_blocks();
+        builder.finalize();
+    }
+
+    compiler.ctx.set_disasm(true);
+    compiler
+        .module
+        .define_function(func_id, &mut compiler.ctx)
+        .expect("Failed to define function");
+
+    if let Some(compiled) = compiler.ctx.compiled_code() {
+        if let Some(disasm) = &compiled.vcode {
+            println!("=== VCode for i32x16_gather_dd_pressure ===\n{}", disasm);
+            assert!(
+                disasm.contains("vpgatherdd"),
+                "Expected VPGATHERDD instruction"
+            );
+            assert_no_vpgather_index_dest_alias(disasm);
+        }
+    }
+}
+
 #[test]
 fn test_i32x16_scatter_dd() {
     let Some(mut compiler) = TestCompiler::new() else {

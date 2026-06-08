@@ -1334,7 +1334,7 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             mask,
             ..
         } => {
-            collector.reg_def(dst);
+            collector.reg_early_def(dst);
             collector.reg_use(base);
             collector.reg_use(index);
             collector.reg_use(mask);
