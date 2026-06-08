@@ -7174,19 +7174,21 @@ fn test_i32x16_gather_dd() {
 }
 
 fn assert_no_vpgather_index_dest_alias(disasm: &str) {
+    let mut gather_count = 0;
     for line in disasm.lines() {
         let Some(gather_pos) = line.find("vpgather") else {
             continue;
         };
+        gather_count += 1;
         let gather = &line[gather_pos..];
         let Some((_, operands)) = gather.split_once(' ') else {
-            continue;
+            panic!("could not parse gather operands: {line}");
         };
         let Some((dest, rest)) = operands.split_once(',') else {
-            continue;
+            panic!("could not parse gather destination: {line}");
         };
         let Some(index_start) = rest.find("%xmm") else {
-            continue;
+            panic!("could not parse gather VSIB index: {line}");
         };
         let index = rest[index_start..]
             .split(|c: char| !(c.is_ascii_alphanumeric() || c == '%'))
@@ -7202,6 +7204,10 @@ fn assert_no_vpgather_index_dest_alias(disasm: &str) {
             "gather destination and VSIB index must be distinct: {line}"
         );
     }
+    assert!(
+        gather_count > 0,
+        "expected at least one VPGATHER instruction in disassembly"
+    );
 }
 
 #[test]
@@ -7283,16 +7289,20 @@ fn test_i32x16_gather_dd_dest_index_distinct_under_pressure() {
         .define_function(func_id, &mut compiler.ctx)
         .expect("Failed to define function");
 
-    if let Some(compiled) = compiler.ctx.compiled_code() {
-        if let Some(disasm) = &compiled.vcode {
-            println!("=== VCode for i32x16_gather_dd_pressure ===\n{}", disasm);
-            assert!(
-                disasm.contains("vpgatherdd"),
-                "Expected VPGATHERDD instruction"
-            );
-            assert_no_vpgather_index_dest_alias(disasm);
-        }
-    }
+    let compiled = compiler
+        .ctx
+        .compiled_code()
+        .expect("compiled code should be available after define_function");
+    let disasm = compiled
+        .vcode
+        .as_ref()
+        .expect("vcode should be available after set_disasm(true)");
+    println!("=== VCode for i32x16_gather_dd_pressure ===\n{}", disasm);
+    assert!(
+        disasm.contains("vpgatherdd"),
+        "Expected VPGATHERDD instruction"
+    );
+    assert_no_vpgather_index_dest_alias(disasm);
 }
 
 #[test]
