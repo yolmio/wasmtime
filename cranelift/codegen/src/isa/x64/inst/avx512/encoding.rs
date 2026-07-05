@@ -48,22 +48,18 @@ pub struct EvexPrefix {
 }
 
 impl EvexPrefix {
-    /// Emit the EVEX prefix to the code buffer.
+    /// Emit the EVEX prefix for a register-to-register form (ModRM.mod =
+    /// 0b11) to the code buffer. Memory-operand forms need the X/B bits
+    /// derived from the base/index registers and must not use this method;
+    /// the only remaining manual memory form (VSIB gather/scatter) goes
+    /// through `emit_vsib` instead.
     ///
     /// # Arguments
     /// * `dst_enc` - Destination register encoding (0-31)
     /// * `src1_enc` - First source register encoding (vvvv field, 0-31)
     /// * `src2_enc` - Second source register encoding (R/M field, 0-31)
-    /// * `is_mem` - Whether src2 is a memory operand
     /// * `sink` - The code buffer to emit into
-    pub fn emit(
-        &self,
-        dst_enc: u8,
-        src1_enc: u8,
-        src2_enc: u8,
-        is_mem: bool,
-        sink: &mut MachBuffer<Inst>,
-    ) {
+    pub fn emit_reg(&self, dst_enc: u8, src1_enc: u8, src2_enc: u8, sink: &mut MachBuffer<Inst>) {
         // Byte 0: EVEX escape byte
         sink.put1(0x62);
 
@@ -72,17 +68,10 @@ impl EvexPrefix {
         let r = if dst_enc & 0x08 != 0 { 0 } else { 1 };
         let r_prime = if dst_enc & 0x10 != 0 { 0 } else { 1 };
 
-        // X and B depend on whether we have a memory operand
-        let (x, b) = if is_mem {
-            // For memory operands, X and B come from the SIB/base register
-            // For now, assume no extension bits needed for memory
-            (1, 1)
-        } else {
-            // For register operands, B extends src2
-            let b = if src2_enc & 0x08 != 0 { 0 } else { 1 };
-            let x = if src2_enc & 0x10 != 0 { 0 } else { 1 };
-            (x, b)
-        };
+        // For register operands, B extends src2 (bit 3) and X extends src2
+        // (bit 4, EVEX's fifth register-encoding bit).
+        let b = if src2_enc & 0x08 != 0 { 0 } else { 1 };
+        let x = if src2_enc & 0x10 != 0 { 0 } else { 1 };
 
         let p0 = (r << 7) | (x << 6) | (b << 5) | (r_prime << 4) | (self.map & 0x07);
         sink.put1(p0);
@@ -96,137 +85,6 @@ impl EvexPrefix {
         // Byte 3 (P2): z L'L b V' aaa
         let l_prime = (self.ll >> 1) & 1;
         let l = self.ll & 1;
-        let v_prime = if src1_enc & 0x10 != 0 { 0 } else { 1 };
-        // IMPORTANT: Zeroing mode (z=1) is only valid with a mask register (aaa != 0)
-        // Without a mask, z must be 0 even if self.z is true
-        let z = if self.aaa == 0 { 0 } else { self.z as u8 };
-        let p2 = (z << 7)
-            | (l_prime << 6)
-            | (l << 5)
-            | ((self.b as u8) << 4)
-            | (v_prime << 3)
-            | (self.aaa & 0x07);
-        sink.put1(p2);
-    }
-
-    /// Emit the EVEX prefix for a memory operand with explicit base/index register encodings.
-    ///
-    /// This is used for load/store instructions where we need to encode the
-    /// base register extension bits (B) and index register extension bits (X)
-    /// correctly in the EVEX prefix.
-    ///
-    /// # Arguments
-    /// * `reg_enc` - The vector register encoding (destination for loads, source for stores)
-    /// * `base_enc` - The base GPR register encoding (0-15)
-    /// * `index_enc` - The index GPR register encoding (0-15), or None if no index
-    /// * `sink` - The code buffer to emit into
-    pub fn emit_for_mem(
-        &self,
-        reg_enc: u8,
-        base_enc: u8,
-        index_enc: Option<u8>,
-        sink: &mut MachBuffer<Inst>,
-    ) {
-        // Byte 0: EVEX escape byte
-        sink.put1(0x62);
-
-        // Byte 1 (P0): R X B R' 0 0 mm
-        // R extends reg_enc bit 3, R' extends reg_enc bit 4
-        // B extends base_enc bit 3
-        // X extends index_enc bit 3 (or 1 if no index)
-        let r = if reg_enc & 0x08 != 0 { 0 } else { 1 };
-        let r_prime = if reg_enc & 0x10 != 0 { 0 } else { 1 };
-        let b = if base_enc & 0x08 != 0 { 0 } else { 1 };
-        let x = match index_enc {
-            Some(idx) => {
-                if idx & 0x08 != 0 {
-                    0
-                } else {
-                    1
-                }
-            }
-            None => 1, // No index register, X bit is 1 (inverted 0)
-        };
-
-        let p0 = (r << 7) | (x << 6) | (b << 5) | (r_prime << 4) | (self.map & 0x07);
-        sink.put1(p0);
-
-        // Byte 2 (P1): W vvvv 1 pp
-        // For loads/stores, vvvv is typically unused (set to 1111 = no register)
-        let vvvv = 0x0F; // All ones = no second source register
-        let p1 = ((self.w as u8) << 7) | (vvvv << 3) | 0x04 | (self.pp & 0x03);
-        sink.put1(p1);
-
-        // Byte 3 (P2): z L'L b V' aaa
-        let l_prime = (self.ll >> 1) & 1;
-        let l = self.ll & 1;
-        let v_prime = 1; // No second source register extension
-        // IMPORTANT: Zeroing mode (z=1) is only valid with a mask register (aaa != 0)
-        // Without a mask, z must be 0 even if self.z is true
-        let z = if self.aaa == 0 { 0 } else { self.z as u8 };
-        let p2 = (z << 7)
-            | (l_prime << 6)
-            | (l << 5)
-            | ((self.b as u8) << 4)
-            | (v_prime << 3)
-            | (self.aaa & 0x07);
-        sink.put1(p2);
-    }
-
-    /// Emit the EVEX prefix for ALU instructions with memory operands.
-    ///
-    /// This is used for 3-operand ALU instructions (dst = src1 op mem) where we need to
-    /// encode the src1 register in the vvvv field while also correctly encoding the
-    /// base/index register extension bits for the memory operand.
-    ///
-    /// # Arguments
-    /// * `dst_enc` - Destination vector register encoding (0-31)
-    /// * `src1_enc` - First source vector register encoding (0-31), encoded in vvvv
-    /// * `base_enc` - Base GPR register encoding for memory operand (0-15)
-    /// * `index_enc` - Index GPR register encoding (0-15), or None if no index
-    /// * `sink` - The code buffer to emit into
-    pub fn emit_for_alu_mem(
-        &self,
-        dst_enc: u8,
-        src1_enc: u8,
-        base_enc: u8,
-        index_enc: Option<u8>,
-        sink: &mut MachBuffer<Inst>,
-    ) {
-        // Byte 0: EVEX escape byte
-        sink.put1(0x62);
-
-        // Byte 1 (P0): R X B R' 0 0 mm
-        // R extends dst_enc bit 3, R' extends dst_enc bit 4
-        // B extends base_enc bit 3
-        // X extends index_enc bit 3 (or 1 if no index)
-        let r = if dst_enc & 0x08 != 0 { 0 } else { 1 };
-        let r_prime = if dst_enc & 0x10 != 0 { 0 } else { 1 };
-        let b = if base_enc & 0x08 != 0 { 0 } else { 1 };
-        let x = match index_enc {
-            Some(idx) => {
-                if idx & 0x08 != 0 {
-                    0
-                } else {
-                    1
-                }
-            }
-            None => 1, // No index register, X bit is 1 (inverted 0)
-        };
-
-        let p0 = (r << 7) | (x << 6) | (b << 5) | (r_prime << 4) | (self.map & 0x07);
-        sink.put1(p0);
-
-        // Byte 2 (P1): W vvvv 1 pp
-        // vvvv encodes src1 (inverted)
-        let vvvv = !src1_enc & 0x0F;
-        let p1 = ((self.w as u8) << 7) | (vvvv << 3) | 0x04 | (self.pp & 0x03);
-        sink.put1(p1);
-
-        // Byte 3 (P2): z L'L b V' aaa
-        let l_prime = (self.ll >> 1) & 1;
-        let l = self.ll & 1;
-        // V' extends src1_enc bit 4 (inverted)
         let v_prime = if src1_enc & 0x10 != 0 { 0 } else { 1 };
         // IMPORTANT: Zeroing mode (z=1) is only valid with a mask register (aaa != 0)
         // Without a mask, z must be 0 even if self.z is true
@@ -375,61 +233,6 @@ impl EvexDisp {
     }
 }
 
-impl EvexPrefix {
-    /// Create an EVEX prefix for a 512-bit AVX-512 operation with default settings.
-    pub fn new_512bit(map: u8, w: bool, pp: u8) -> Self {
-        Self {
-            map,
-            w,
-            pp,
-            aaa: 0,   // no mask
-            z: false, // merging (not zeroing)
-            b: false, // no broadcast
-            ll: 0b10, // 512-bit
-        }
-    }
-
-    /// Set the write mask register (k1-k7).
-    pub fn with_mask(mut self, kreg: u8) -> Self {
-        debug_assert!(kreg <= 7, "k-register index must be 0-7");
-        self.aaa = kreg;
-        self
-    }
-
-    /// Enable zeroing mode (z bit).
-    pub fn with_zeroing(mut self) -> Self {
-        self.z = true;
-        self
-    }
-
-    /// Enable broadcast mode (b bit).
-    pub fn with_broadcast(mut self) -> Self {
-        self.b = true;
-        self
-    }
-
-    /// Validate the EVEX prefix configuration.
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if self.map > 3 {
-            return Err("EVEX map must be 0-3");
-        }
-        if self.pp > 3 {
-            return Err("EVEX pp must be 0-3");
-        }
-        if self.aaa > 7 {
-            return Err("EVEX aaa (mask register) must be 0-7");
-        }
-        if self.ll > 2 {
-            return Err("EVEX ll (vector length) must be 0-2");
-        }
-        // z bit requires a mask register (aaa != 0)
-        if self.z && self.aaa == 0 {
-            return Err("Zeroing mode requires a mask register (k1-k7)");
-        }
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -463,124 +266,6 @@ mod tests {
         assert_eq!(evex.aaa, 0);
         assert!(!evex.z);
         assert_eq!(evex.ll, 0b10);
-    }
-
-    #[test]
-    fn test_evex_prefix_new_512bit() {
-        let evex = EvexPrefix::new_512bit(0x02, true, 0x01);
-        assert_eq!(evex.map, 0x02);
-        assert!(evex.w);
-        assert_eq!(evex.pp, 0x01);
-        assert_eq!(evex.ll, 0b10);
-        assert_eq!(evex.aaa, 0);
-        assert!(!evex.z);
-        assert!(!evex.b);
-    }
-
-    #[test]
-    fn test_evex_prefix_with_mask() {
-        let evex = EvexPrefix::new_512bit(0x01, false, 0x01).with_mask(3);
-        assert_eq!(evex.aaa, 3);
-    }
-
-    #[test]
-    fn test_evex_prefix_with_zeroing() {
-        let evex = EvexPrefix::new_512bit(0x01, false, 0x01)
-            .with_mask(1)
-            .with_zeroing();
-        assert!(evex.z);
-        assert_eq!(evex.aaa, 1);
-    }
-
-    #[test]
-    fn test_evex_prefix_with_broadcast() {
-        let evex = EvexPrefix::new_512bit(0x01, false, 0x01).with_broadcast();
-        assert!(evex.b);
-    }
-
-    // =========================================================================
-    // EVEX Prefix Validation Tests
-    // =========================================================================
-
-    #[test]
-    fn test_evex_prefix_validate_valid() {
-        let evex = EvexPrefix::new_512bit(0x01, false, 0x01);
-        assert!(evex.validate().is_ok());
-
-        let evex_with_mask = EvexPrefix::new_512bit(0x02, true, 0x01)
-            .with_mask(1)
-            .with_zeroing();
-        assert!(evex_with_mask.validate().is_ok());
-    }
-
-    #[test]
-    fn test_evex_prefix_validate_invalid_map() {
-        let evex = EvexPrefix {
-            map: 4, // Invalid: must be 0-3
-            w: false,
-            pp: 0x01,
-            aaa: 0,
-            z: false,
-            b: false,
-            ll: 0b10,
-        };
-        assert!(evex.validate().is_err());
-    }
-
-    #[test]
-    fn test_evex_prefix_validate_invalid_pp() {
-        let evex = EvexPrefix {
-            map: 0x01,
-            w: false,
-            pp: 4, // Invalid: must be 0-3
-            aaa: 0,
-            z: false,
-            b: false,
-            ll: 0b10,
-        };
-        assert!(evex.validate().is_err());
-    }
-
-    #[test]
-    fn test_evex_prefix_validate_invalid_aaa() {
-        let evex = EvexPrefix {
-            map: 0x01,
-            w: false,
-            pp: 0x01,
-            aaa: 8, // Invalid: must be 0-7
-            z: false,
-            b: false,
-            ll: 0b10,
-        };
-        assert!(evex.validate().is_err());
-    }
-
-    #[test]
-    fn test_evex_prefix_validate_invalid_ll() {
-        let evex = EvexPrefix {
-            map: 0x01,
-            w: false,
-            pp: 0x01,
-            aaa: 0,
-            z: false,
-            b: false,
-            ll: 3, // Invalid: must be 0-2
-        };
-        assert!(evex.validate().is_err());
-    }
-
-    #[test]
-    fn test_evex_prefix_validate_zeroing_without_mask() {
-        let evex = EvexPrefix {
-            map: 0x01,
-            w: false,
-            pp: 0x01,
-            aaa: 0,  // No mask
-            z: true, // But zeroing is set - invalid!
-            b: false,
-            ll: 0b10,
-        };
-        assert!(evex.validate().is_err());
     }
 
     // =========================================================================
