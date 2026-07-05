@@ -335,8 +335,11 @@
 
 ;; f32 and f64
 
+;; Note that `x` and `y` are both constrained to being in registers here because
+;; x86 instructions with a memory operand will load 128 bits, not the desired
+;; bit width of 32 or 64 bits here.
 (rule 5 (lower (has_type (ty_scalar_float ty) (band x y)))
-      (sse_and ty x y))
+      (sse_and ty x (put_in_xmm y)))
 
 ;; SSE.
 
@@ -459,8 +462,11 @@
 
 ;; f32 and f64
 
+;; Note that `x` and `y` are both constrained to being in registers here because
+;; x86 instructions with a memory operand will load 128 bits, not the desired
+;; bit width of 32 or 64 bits here.
 (rule 5 (lower (has_type (ty_scalar_float ty) (bor x y)))
-      (sse_or ty x y))
+      (sse_or ty x (put_in_xmm y)))
 
 ;; SSE.
 
@@ -530,8 +536,11 @@
 
 ;; f32 and f64
 
+;; Note that `x` and `y` are both constrained to being in registers here because
+;; x86 instructions with a memory operand will load 128 bits, not the desired
+;; bit width of 32 or 64 bits here.
 (rule 5 (lower (has_type (ty_scalar_float ty) (bxor x y)))
-      (x64_xor_vector ty x y))
+      (x64_xor_vector ty x (put_in_xmm y)))
 
 ;; SSE.
 
