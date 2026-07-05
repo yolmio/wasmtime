@@ -286,23 +286,41 @@ fn gen_common_isle(
                     .filter(|o| o.is_value())
                     .map(|o| o.name)
                     .collect();
-                let varargs = inst
-                    .operands_in
-                    .iter()
-                    .find(|o| o.is_varargs())
-                    .unwrap()
-                    .name;
-                if values.is_empty() {
-                    write!(&mut s, " (value_list_slice {varargs})").unwrap();
-                } else {
-                    write!(
-                        &mut s,
-                        " (unwrap_head_value_list_{} {} {})",
-                        values.len(),
-                        values.join(" "),
-                        varargs
-                    )
-                    .unwrap();
+                match inst.operands_in.iter().find(|o| o.is_varargs()) {
+                    Some(varargs) => {
+                        let varargs = varargs.name;
+                        if values.is_empty() {
+                            write!(&mut s, " (value_list_slice {varargs})").unwrap();
+                        } else {
+                            write!(
+                                &mut s,
+                                " (unwrap_head_value_list_{} {} {})",
+                                values.len(),
+                                values.join(" "),
+                                varargs
+                            )
+                            .unwrap();
+                        }
+                    }
+                    None => {
+                        // The format stores its (fixed) value operands
+                        // out-of-line in a `ValueList` even though the
+                        // instruction has no varargs operand (this keeps
+                        // `InstructionData` small). Unwrap each value off
+                        // the front of the list, ignoring the (empty)
+                        // remainder.
+                        assert!(
+                            !values.is_empty(),
+                            "value-list format {} for {} has no operands at all",
+                            inst.format.name,
+                            inst.name,
+                        );
+                        let mut pat = "_".to_string();
+                        for v in values.iter().rev() {
+                            pat = format!("(value_slice_unwrap {v} {pat})");
+                        }
+                        write!(&mut s, " (value_list_slice {pat})").unwrap();
+                    }
                 }
             } else if inst.format.num_value_operands == 1 {
                 write!(

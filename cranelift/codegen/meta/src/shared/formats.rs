@@ -235,12 +235,20 @@ impl Formats {
                 .build(),
 
             // AVX-512 SIMD memory operations
+            //
+            // These formats store their value operands in an out-of-line
+            // `ValueList` (via `.varargs()`, even though the operand counts
+            // are fixed) so that `InstructionData` stays at 16 bytes: the
+            // inline immediates (MemFlags + scale + offset) plus multiple
+            // inline `Value`s would otherwise push it to 24 bytes.
+
             // Gather: load elements from base + indices * scale
             // Format: memflags, base (addr), indices (vector), scale (1/2/4/8), offset
             simd_gather: Builder::new("SimdGather")
                 .imm(&imm.memflags)
                 .value() // base address
                 .value() // indices vector
+                .varargs() // keep the value operands in a ValueList
                 .imm(&imm.uimm8) // scale factor (1, 2, 4, or 8)
                 .imm(&imm.offset32)
                 .typevar_operand(1) // indices type determines result type
@@ -254,6 +262,7 @@ impl Formats {
                 .value() // value to scatter
                 .value() // base address
                 .value() // indices vector
+                .varargs() // keep the value operands in a ValueList
                 .imm(&imm.uimm8) // scale factor (1, 2, 4, or 8)
                 .imm(&imm.offset32)
                 .typevar_operand(1) // value type is controlling
@@ -266,6 +275,7 @@ impl Formats {
                 .value() // mask
                 .value() // passthru (load) or value (store)
                 .value() // base address
+                .varargs() // keep the value operands in a ValueList
                 .imm(&imm.offset32)
                 .typevar_operand(1) // value type is controlling
                 .build(),

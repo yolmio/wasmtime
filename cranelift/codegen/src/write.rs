@@ -544,32 +544,41 @@ pub fn write_operands(w: &mut dyn Write, dfg: &DataFlowGraph, inst: Inst) -> fmt
         } => write!(w, "{} {}, {}{}", flags, args[0], args[1], offset),
         SimdGather {
             flags,
-            args,
+            ref args,
             imm,
             offset,
             ..
-        } => write!(w, "{} {}, {}, *{}{}", flags, args[0], args[1], imm, offset),
+        } => {
+            let args = args.as_slice(pool);
+            write!(w, "{} {}, {}, *{}{}", flags, args[0], args[1], imm, offset)
+        }
         SimdMaskedMem {
             flags,
-            args,
+            ref args,
             offset,
             ..
-        } => write!(
-            w,
-            "{} {}, {}, {}{}",
-            flags, args[0], args[1], args[2], offset
-        ),
+        } => {
+            let args = args.as_slice(pool);
+            write!(
+                w,
+                "{} {}, {}, {}{}",
+                flags, args[0], args[1], args[2], offset
+            )
+        }
         SimdScatter {
             flags,
-            args,
+            ref args,
             imm,
             offset,
             ..
-        } => write!(
-            w,
-            "{} {}, {}, {}, {}, *{}{}",
-            flags, args[0], args[1], args[2], args[3], imm, offset
-        ),
+        } => {
+            let args = args.as_slice(pool);
+            write!(
+                w,
+                "{} {}, {}, {}, {}, *{}{}",
+                flags, args[0], args[1], args[2], args[3], imm, offset
+            )
+        }
         Trap { code, .. } => write!(w, " {code}"),
         CondTrap { arg, code, .. } => write!(w, " {arg}, {code}"),
         ExceptionHandlerAddress { block, imm, .. } => write!(w, " {block}, {imm}"),

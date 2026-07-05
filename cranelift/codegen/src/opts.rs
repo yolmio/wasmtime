@@ -22,7 +22,6 @@ use core::marker::PhantomData;
 pub type Unit = ();
 pub type ValueArray2 = [Value; 2];
 pub type ValueArray3 = [Value; 3];
-pub type ValueArray4 = [Value; 4];
 
 const MAX_ISLE_RETURNS: usize = 8;
 
@@ -234,16 +233,6 @@ impl<'a, 'b, 'c> generated_code::Context for IsleContext<'a, 'b, 'c> {
 
     fn value_array_3_ctor(&mut self, arg0: Value, arg1: Value, arg2: Value) -> ValueArray3 {
         [arg0, arg1, arg2]
-    }
-
-    fn value_array_4_ctor(
-        &mut self,
-        arg0: Value,
-        arg1: Value,
-        arg2: Value,
-        arg3: Value,
-    ) -> ValueArray4 {
-        [arg0, arg1, arg2, arg3]
     }
 
     #[inline]

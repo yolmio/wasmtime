@@ -3431,7 +3431,10 @@ impl<'a> Parser<'a> {
                 InstructionData::SimdGather {
                     opcode,
                     flags,
-                    args: [base, indices],
+                    args: ir::ValueList::from_slice(
+                        &[base, indices],
+                        &mut ctx.function.dfg.value_lists,
+                    ),
                     imm: scale,
                     offset,
                 }
@@ -3452,7 +3455,10 @@ impl<'a> Parser<'a> {
                 InstructionData::SimdScatter {
                     opcode,
                     flags,
-                    args: [mask, value, base, indices],
+                    args: ir::ValueList::from_slice(
+                        &[mask, value, base, indices],
+                        &mut ctx.function.dfg.value_lists,
+                    ),
                     imm: scale,
                     offset,
                 }
@@ -3469,7 +3475,10 @@ impl<'a> Parser<'a> {
                 InstructionData::SimdMaskedMem {
                     opcode,
                     flags,
-                    args: [mask, passthru_or_value, base],
+                    args: ir::ValueList::from_slice(
+                        &[mask, passthru_or_value, base],
+                        &mut ctx.function.dfg.value_lists,
+                    ),
                     offset,
                 }
             }
