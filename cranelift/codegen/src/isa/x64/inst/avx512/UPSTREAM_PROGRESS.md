@@ -2,7 +2,7 @@
 
 ## Status: IN PROGRESS
 
-Last Updated: 2025-12-29
+Last Updated: 2026-07-05 (avx512-hardening branch)
 
 ---
 
@@ -34,7 +34,7 @@ Last Updated: 2025-12-29
 | M1 | Run cargo fmt | DONE | Formatting fixed |
 | M2 | Add #[must_use] | DONE | Added to Kmask new/enc/to_string |
 | M3 | Document priority scheme | DONE | Already in avx512.isle header |
-| M4 | K-register allocation | DEFER | Complex - future work |
+| M4 | K-register allocation | DONE | k-regs are regalloc2 Vector class; k2-k7 allocatable, k0/k1 excluded; vp2intersect uses structurally-even KRegPair fixed defs |
 | M5 | Missing instructions | DONE | Added VMOVAPS/VMOVAPD/VMOVUPS/VMOVUPD (512-bit) |
 | M6 | Remove println in tests | DONE | Removed redundant PASS/PASSED messages |
 
@@ -44,7 +44,7 @@ Last Updated: 2025-12-29
 |---|-------|--------|-------|
 | L1 | Format name consolidation | DONE | Added comprehensive docs to avx512.rs header |
 | L2 | VL variants | DEFER | 128/256-bit EVEX - future work |
-| L3 | Gather/scatter support | DEFER | Requires VSIB addressing mode - not in DSL |
+| L3 | Gather/scatter support | DONE | Hand-written VSIB emission (this module); disp8*N via EvexDisp; mask clobber modeled; verifier-checked types/scale |
 
 ---
 
@@ -168,8 +168,10 @@ Last Updated: 2025-12-29
 | K-mask ALU | KAND/OR/XOR/NOT | ✅ Complete |
 | Compress/Expand | VPCOMPRESS/VPEXPAND | ✅ Complete |
 | Conflict Detection | VPCONFLICT | ✅ Complete |
-| Gather/Scatter | VPGATHER/VPSCATTER | ⏸️ Deferred |
-| VL variants | 128/256-bit EVEX | ⏸️ Deferred |
+| Gather/Scatter | VPGATHER/VPSCATTER (DD/QQ/DQ) | ✅ Complete |
+| Ternary logic | VPTERNLOGD/Q (bitselect + 3-input fusion) | ✅ Complete |
+| Intersection | VP2INTERSECTD/Q (x86_simd_vp2intersect_mask) | ✅ Complete |
+| VL variants | 128/256-bit EVEX | ⏸️ Deferred (256-bit loads/stores only) |
 
 ### Required CPU Features
 
