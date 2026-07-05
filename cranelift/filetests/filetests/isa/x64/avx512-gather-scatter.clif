@@ -1,0 +1,192 @@
+test compile precise-output
+target x86_64 has_avx512f has_avx512bw has_avx512dq has_avx512vl
+
+;; AVX-512 gather/scatter with non-zero displacements.
+;;
+;; Regression guards for:
+;; - EVEX compressed displacement (disp8*N): the encoded disp8 byte is
+;;   disp / element_size, so offsets like +8 must not be emitted raw.
+;;   (The byte-exact encoding assertions live in the unit tests in
+;;   cranelift/codegen/src/isa/x64/inst/avx512/emit.rs; this test locks the
+;;   VCode shape.)
+;; - The mask k-register is read *and* clobbered by VPGATHER*/VPSCATTER*
+;;   (the hardware zeroes it as elements complete), so every gather/scatter
+;;   must be preceded by its own mask materialization (kxnorw / vpmovd2m)
+;;   and no mask k-register may be reused across two gathers/scatters.
+
+function %gather_i32x16_off8(i64, i32x16) -> i32x16 {
+block0(v0: i64, v1: i32x16):
+    v2 = x86_simd_gather.i32x16 notrap aligned v0, v1, 1+8
+    return v2
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   kxnorw %k1, %k1, %k5
+;   vmovdqu32 %zmm0, %zmm7
+;   vpgatherdd %zmm0 {%k5}, [%rdi + %zmm7*1 + 8]
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   kxnorw %k1, %k1, %k5
+;   vmovdqu32 %zmm0, %zmm7
+;   vpgatherdd 8(%rdi, %zmm7), %zmm0 {%k5}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %gather_i32x16_off512(i64, i32x16) -> i32x16 {
+block0(v0: i64, v1: i32x16):
+    v2 = x86_simd_gather.i32x16 notrap aligned v0, v1, 1+512
+    return v2
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   kxnorw %k1, %k1, %k5
+;   vmovdqu32 %zmm0, %zmm7
+;   vpgatherdd %zmm0 {%k5}, [%rdi + %zmm7*1 + 512]
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   kxnorw %k1, %k1, %k5
+;   vmovdqu32 %zmm0, %zmm7
+;   vpgatherdd 0x200(%rdi, %zmm7), %zmm0 {%k5}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %gather_i64x8_off8(i64, i64x8) -> i64x8 {
+block0(v0: i64, v1: i64x8):
+    v2 = x86_simd_gather.i64x8 notrap aligned v0, v1, 1+8
+    return v2
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   kxnorw %k1, %k1, %k5
+;   vmovdqu32 %zmm0, %zmm7
+;   vpgatherqq %zmm0 {%k5}, [%rdi + %zmm7*1 + 8]
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   kxnorw %k1, %k1, %k5
+;   vmovdqu32 %zmm0, %zmm7
+;   vpgatherqq 8(%rdi, %zmm7), %zmm0 {%k5}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %scatter_i32x16_off8(i64, i32x16, i32x16, i32x16) {
+block0(v0: i64, v1: i32x16, v2: i32x16, v3: i32x16):
+    x86_simd_scatter notrap aligned v1, v2, v0, v3, 1+8
+    return
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vpmovd2m %zmm0, %k6
+;   vpscatterdd [%rdi + %zmm2*1 + 8] {%k6}, %zmm1
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vpmovd2m %zmm0, %k6
+;   vpscatterdd %zmm1, 8(%rdi, %zmm2) {%k6}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %scatter_i64x8_off8(i64, i64x8, i64x8, i64x8) {
+block0(v0: i64, v1: i64x8, v2: i64x8, v3: i64x8):
+    x86_simd_scatter notrap aligned v1, v2, v0, v3, 1+8
+    return
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vpmovq2m %zmm0, %k6
+;   vpscatterqq [%rdi + %zmm2*1 + 8] {%k6}, %zmm1
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vpmovq2m %zmm0, %k6
+;   vpscatterqq %zmm1, 8(%rdi, %zmm2) {%k6}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %two_gathers_same_indices(i64, i32x16) -> i32x16 {
+block0(v0: i64, v1: i32x16):
+    v2 = x86_simd_gather.i32x16 notrap aligned v0, v1, 1+0
+    v3 = x86_simd_gather.i32x16 notrap aligned v0, v1, 1+8
+    v4 = iadd v2, v3
+    return v4
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   kxnorw %k1, %k1, %k2
+;   vpgatherdd %zmm1 {%k2}, [%rdi + %zmm0*1 + 0]
+;   kxnorw %k1, %k1, %k2
+;   vpgatherdd %zmm2 {%k2}, [%rdi + %zmm0*1 + 8]
+;   vpaddd %zmm2, %zmm1, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   kxnorw %k1, %k1, %k2
+;   vpgatherdd (%rdi, %zmm0), %zmm1 {%k2}
+;   kxnorw %k1, %k1, %k2
+;   vpgatherdd 8(%rdi, %zmm0), %zmm2 {%k2}
+;   vpaddd %zmm2, %zmm1, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+

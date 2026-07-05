@@ -802,34 +802,16 @@ pub fn emit_gather(
 
     // EVEX uses compressed displacement (disp8*N) where N is the element size.
     // For gather/scatter with qword elements (W=1), N=8; for dword (W=0), N=4.
-    let elem_size = op.element_size() as i32;
+    // `EvexDisp` performs the disp8 scaling; both gather and scatter must go
+    // through it so a raw displacement can never be emitted as disp8.
+    let disp = EvexDisp::new(disp, op.element_size(), base_enc);
 
-    // Try to use compressed disp8 encoding if displacement is aligned to element size
-    let can_use_disp8 = disp != 0 && (disp % elem_size) == 0;
-    let compressed_disp = if can_use_disp8 { disp / elem_size } else { 0 };
-    let use_disp8 = can_use_disp8 && compressed_disp >= -128 && compressed_disp <= 127;
-
-    if disp == 0 && (base_enc & 0x07) != 5 {
-        // mod=00: no displacement (unless base is RBP/R13)
-        let modrm = 0x04 | ((dst_enc & 0x07) << 3);
-        sink.put1(modrm);
-        let sib = (scale_bits << 6) | ((index_enc & 0x07) << 3) | (base_enc & 0x07);
-        sink.put1(sib);
-    } else if use_disp8 {
-        // mod=01: 8-bit compressed displacement (disp8 * element_size)
-        let modrm = 0x44 | ((dst_enc & 0x07) << 3);
-        sink.put1(modrm);
-        let sib = (scale_bits << 6) | ((index_enc & 0x07) << 3) | (base_enc & 0x07);
-        sink.put1(sib);
-        sink.put1(compressed_disp as u8);
-    } else {
-        // mod=10: 32-bit displacement (not compressed)
-        let modrm = 0x84 | ((dst_enc & 0x07) << 3);
-        sink.put1(modrm);
-        let sib = (scale_bits << 6) | ((index_enc & 0x07) << 3) | (base_enc & 0x07);
-        sink.put1(sib);
-        sink.put4(disp as u32);
-    }
+    // ModRM: mod=disp form, reg=dst, rm=100 (SIB follows)
+    let modrm = (disp.mod_bits() << 6) | ((dst_enc & 0x07) << 3) | 0x04;
+    sink.put1(modrm);
+    let sib = (scale_bits << 6) | ((index_enc & 0x07) << 3) | (base_enc & 0x07);
+    sink.put1(sib);
+    disp.emit(sink);
 }
 
 /// Emit a VPSCATTER instruction (store elements to non-contiguous memory by indices).
@@ -877,24 +859,18 @@ pub fn emit_scatter(
         _ => panic!("Invalid scale for scatter: {scale}"),
     };
 
-    if disp == 0 && (base_enc & 0x07) != 5 {
-        let modrm = 0x04 | ((src_enc & 0x07) << 3);
-        sink.put1(modrm);
-        let sib = (scale_bits << 6) | ((index_enc & 0x07) << 3) | (base_enc & 0x07);
-        sink.put1(sib);
-    } else if disp >= -128 && disp <= 127 {
-        let modrm = 0x44 | ((src_enc & 0x07) << 3);
-        sink.put1(modrm);
-        let sib = (scale_bits << 6) | ((index_enc & 0x07) << 3) | (base_enc & 0x07);
-        sink.put1(sib);
-        sink.put1(disp as u8);
-    } else {
-        let modrm = 0x84 | ((src_enc & 0x07) << 3);
-        sink.put1(modrm);
-        let sib = (scale_bits << 6) | ((index_enc & 0x07) << 3) | (base_enc & 0x07);
-        sink.put1(sib);
-        sink.put4(disp as u32);
-    }
+    // EVEX uses compressed displacement (disp8*N) where N is the element
+    // size, exactly as for gather above: the disp8 byte holds `disp / N` and
+    // the hardware multiplies it back by N. Emitting the raw displacement as
+    // disp8 would silently store to `base + index*scale + disp*N`.
+    let disp = EvexDisp::new(disp, op.element_size(), base_enc);
+
+    // ModRM: mod=disp form, reg=src, rm=100 (SIB follows)
+    let modrm = (disp.mod_bits() << 6) | ((src_enc & 0x07) << 3) | 0x04;
+    sink.put1(modrm);
+    let sib = (scale_bits << 6) | ((index_enc & 0x07) << 3) | (base_enc & 0x07);
+    sink.put1(sib);
+    disp.emit(sink);
 }
 
 // =============================================================================
@@ -2734,5 +2710,140 @@ mod tests {
     fn test_kortest_encoding_constants() {
         // KORTESTW: VEX.L0.0F.W0 98 /r
         assert_eq!(0x98, 152); // Opcode
+    }
+
+    // =========================================================================
+    // Gather/Scatter Displacement Encoding Tests (byte-exact)
+    //
+    // EVEX gather/scatter use compressed displacement (disp8*N): the disp8
+    // byte is `disp / element_size`, which the hardware multiplies back by
+    // the element size. These expected encodings were produced with GNU as
+    // and verified with objdump.
+    // =========================================================================
+
+    use super::super::defs::{GatherOp, ScatterOp};
+    use crate::isa::x64::inst::regs;
+    use alloc::string::String;
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().map(|b| format!("{b:02X}")).collect()
+    }
+
+    /// Emit `vpscatter* [rdi + zmm2*scale + disp] {k1}, zmm1` and return the
+    /// emitted bytes as an uppercase hex string.
+    fn scatter_bytes(op: ScatterOp, scale: u8, disp: i32) -> String {
+        let mut sink = MachBuffer::<Inst>::new();
+        emit_scatter(
+            op,
+            regs::xmm1(),
+            regs::rdi(),
+            regs::xmm2(),
+            scale,
+            disp,
+            regs::k1(),
+            &mut sink,
+        );
+        let buf = sink.finish(&Default::default(), &mut Default::default());
+        hex(buf.data())
+    }
+
+    /// Emit `vpgather* zmm1 {k1}, [rdi + zmm2*scale + disp]` and return the
+    /// emitted bytes as an uppercase hex string.
+    fn gather_bytes(op: GatherOp, scale: u8, disp: i32) -> String {
+        let mut sink = MachBuffer::<Inst>::new();
+        emit_gather(
+            op,
+            Writable::from_reg(regs::xmm1()),
+            regs::rdi(),
+            regs::xmm2(),
+            scale,
+            disp,
+            regs::k1(),
+            &mut sink,
+        );
+        let buf = sink.finish(&Default::default(), &mut Default::default());
+        hex(buf.data())
+    }
+
+    #[test]
+    fn test_scatter_dd_displacement_encoding() {
+        use ScatterOp::Vpscatterdd as DD;
+        // disp 0: mod=00, no displacement bytes.
+        assert_eq!(scatter_bytes(DD, 4, 0), "62F27D49A00C97");
+        // disp +4 with 4-byte elements: compressed disp8 = 1, NOT 4.
+        assert_eq!(scatter_bytes(DD, 4, 4), "62F27D49A04C9701");
+        // disp +8: compressed disp8 = 2, NOT 8. (This is the regression the
+        // old code got wrong: it emitted the raw 0x08, which the hardware
+        // scales to +32.)
+        assert_eq!(scatter_bytes(DD, 4, 8), "62F27D49A04C9702");
+        // disp +64: compressed disp8 = 16.
+        assert_eq!(scatter_bytes(DD, 4, 64), "62F27D49A04C9710");
+        // disp +127: not divisible by 4, must fall back to disp32.
+        assert_eq!(scatter_bytes(DD, 4, 127), "62F27D49A08C977F000000");
+        // disp +128: divisible, compressed disp8 = 32 (raw 128 would not
+        // even fit in a signed disp8).
+        assert_eq!(scatter_bytes(DD, 4, 128), "62F27D49A04C9720");
+        // disp -8: compressed disp8 = -2 (0xFE).
+        assert_eq!(scatter_bytes(DD, 4, -8), "62F27D49A04C97FE");
+        // disp +512 = 128*4: scaled value 128 exceeds i8, must use disp32.
+        assert_eq!(scatter_bytes(DD, 4, 512), "62F27D49A08C9700020000");
+        // disp +508 = 127*4: largest compressible positive displacement.
+        assert_eq!(scatter_bytes(DD, 4, 508), "62F27D49A04C977F");
+    }
+
+    #[test]
+    fn test_scatter_qq_displacement_encoding() {
+        // 8-byte elements: disp +8 compresses to disp8 = 1.
+        // vpscatterqq [rdi + zmm2*8 + 8] {k2}, zmm1
+        let mut sink = MachBuffer::<Inst>::new();
+        emit_scatter(
+            ScatterOp::Vpscatterqq,
+            regs::xmm1(),
+            regs::rdi(),
+            regs::xmm2(),
+            8,
+            8,
+            regs::k2(),
+            &mut sink,
+        );
+        let buf = sink.finish(&Default::default(), &mut Default::default());
+        assert_eq!(hex(buf.data()), "62F2FD4AA14CD701");
+    }
+
+    #[test]
+    fn test_gather_dd_displacement_encoding() {
+        use GatherOp::Vpgatherdd as DD;
+        // Same compressed-displacement rules as scatter (regression guard).
+        assert_eq!(gather_bytes(DD, 4, 0), "62F27D49900C97");
+        assert_eq!(gather_bytes(DD, 4, 4), "62F27D49904C9701");
+        assert_eq!(gather_bytes(DD, 4, 8), "62F27D49904C9702");
+        assert_eq!(gather_bytes(DD, 4, 64), "62F27D49904C9710");
+        assert_eq!(gather_bytes(DD, 4, 127), "62F27D49908C977F000000");
+        assert_eq!(gather_bytes(DD, 4, 128), "62F27D49904C9720");
+        assert_eq!(gather_bytes(DD, 4, -8), "62F27D49904C97FE");
+        assert_eq!(gather_bytes(DD, 4, 512), "62F27D49908C9700020000");
+        assert_eq!(gather_bytes(DD, 4, 508), "62F27D49904C977F");
+    }
+
+    #[test]
+    fn test_gather_qq_dq_displacement_encoding() {
+        // vpgatherqq zmm3 {k2}, [rax + zmm5*8 + 8]: 8-byte elements, disp8 = 1.
+        let mut sink = MachBuffer::<Inst>::new();
+        emit_gather(
+            GatherOp::Vpgatherqq,
+            Writable::from_reg(regs::xmm3()),
+            regs::rax(),
+            regs::xmm5(),
+            8,
+            8,
+            regs::k2(),
+            &mut sink,
+        );
+        let buf = sink.finish(&Default::default(), &mut Default::default());
+        assert_eq!(hex(buf.data()), "62F2FD4A915CE801");
+
+        // vpgatherdq zmm1 {k1}, [rdi + ymm2*1 + 16]: N is the *element* size
+        // (8 for dq), not the index size, so disp8 = 16/8 = 2.
+        assert_eq!(gather_bytes(GatherOp::Vpgatherdq, 1, 16), "62F2FD49904C1702");
     }
 }

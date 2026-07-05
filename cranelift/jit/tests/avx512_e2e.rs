@@ -7187,7 +7187,9 @@ fn assert_no_vpgather_index_dest_alias(disasm: &str) {
         let Some((dest, rest)) = operands.split_once(',') else {
             panic!("could not parse gather destination: {line}");
         };
-        let Some(index_start) = rest.find("%xmm") else {
+        // The VSIB index is printed as %zmmN for real registers (and %xmmN
+        // in older pretty-printing); accept either spelling.
+        let Some(index_start) = rest.find("%zmm").or_else(|| rest.find("%xmm")) else {
             panic!("could not parse gather VSIB index: {line}");
         };
         let index = rest[index_start..]

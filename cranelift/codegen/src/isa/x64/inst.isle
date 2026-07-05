@@ -334,24 +334,35 @@
        ;; VPGATHERDD/DQ/QD/QQ - gather load from non-contiguous memory
        ;; dst = gather(base + index*scale + disp) using mask
        ;; Requires VSIB (Vector Scale Index Base) addressing
+       ;;
+       ;; VPGATHER* architecturally zeroes the mask k-register as elements
+       ;; complete (Intel SDM), so the mask is read *and* clobbered. This is
+       ;; modeled with `mask` (read) plus `mask_tmp`, a dead def constrained
+       ;; by regalloc to reuse `mask`'s register, mirroring the assembler
+       ;; DSL's `PairedMask` read-write pattern.
        (Avx512Gather (op GatherOp)
                     (dst WritableReg)
                     (base Reg)
                     (index Reg)
                     (scale u8)
                     (disp i32)
-                    (mask Reg))
+                    (mask Reg)
+                    (mask_tmp WritableReg))
 
        ;; VPSCATTERDD/DQ/QD/QQ - scatter store to non-contiguous memory
        ;; scatter(base + index*scale + disp) = src using mask
        ;; Requires VSIB (Vector Scale Index Base) addressing
+       ;;
+       ;; Like VPGATHER*, VPSCATTER* zeroes the mask k-register as elements
+       ;; complete; `mask_tmp` models that clobber (see Avx512Gather above).
        (Avx512Scatter (op ScatterOp)
                      (src Reg)
                      (base Reg)
                      (index Reg)
                      (scale u8)
                      (disp i32)
-                     (mask Reg))
+                     (mask Reg)
+                     (mask_tmp WritableReg))
 
        ;; VP2INTERSECT - Hash join acceleration
        ;; Compares two vectors and outputs TWO consecutive mask registers
@@ -4866,6 +4877,12 @@
 ;; Gather: Load non-contiguous elements using indices from another vector
 ;; Scatter: Store elements to non-contiguous locations using indices
 
+;; Fresh dead-def temporary modeling the mask k-register clobber performed by
+;; VPGATHER*/VPSCATTER* (regalloc ties it to the mask operand's register).
+(decl avx512_gather_scatter_mask_tmp () WritableReg)
+(rule (avx512_gather_scatter_mask_tmp)
+      (writable_kmask_to_writable_reg (temp_writable_kmask)))
+
 ;; VPGATHERDD - gather 32-bit elements using 32-bit indices
 (decl x64_512_vpgatherdd (Reg Xmm u8 i32 Reg) Xmm)
 (rule (x64_512_vpgatherdd base indices scale disp mask)
@@ -4877,7 +4894,8 @@
                                               index_reg
                                               scale
                                               disp
-                                              mask))))
+                                              mask
+                                              (avx512_gather_scatter_mask_tmp)))))
         dst))
 
 ;; VPGATHERDQ - gather 64-bit elements using 32-bit indices
@@ -4891,7 +4909,8 @@
                                               index_reg
                                               scale
                                               disp
-                                              mask))))
+                                              mask
+                                              (avx512_gather_scatter_mask_tmp)))))
         dst))
 
 ;; VPGATHERQQ - gather 64-bit elements using 64-bit indices
@@ -4905,7 +4924,8 @@
                                               index_reg
                                               scale
                                               disp
-                                              mask))))
+                                              mask
+                                              (avx512_gather_scatter_mask_tmp)))))
         dst))
 
 ;; VPSCATTERDD - scatter 32-bit elements using 32-bit indices
@@ -4921,7 +4941,8 @@
                               index_reg
                               scale
                               disp
-                              mask))))
+                              mask
+                              (avx512_gather_scatter_mask_tmp)))))
 
 ;; VPSCATTERDQ - scatter 64-bit elements using 32-bit indices
 (decl x64_512_vpscatterdq (Reg Xmm u8 i32 Xmm Reg) SideEffectNoResult)
@@ -4935,7 +4956,8 @@
                               index_reg
                               scale
                               disp
-                              mask))))
+                              mask
+                              (avx512_gather_scatter_mask_tmp)))))
 
 ;; VPSCATTERQQ - scatter 64-bit elements using 64-bit indices
 (decl x64_512_vpscatterqq (Reg Xmm u8 i32 Xmm Reg) SideEffectNoResult)
@@ -4949,7 +4971,8 @@
                               index_reg
                               scale
                               disp
-                              mask))))
+                              mask
+                              (avx512_gather_scatter_mask_tmp)))))
 
 ;; =============================================================================
 ;; 512-bit Load/Store (unmasked)

@@ -1847,7 +1847,12 @@ pub(crate) fn emit(
             scale,
             disp,
             mask,
+            mask_tmp,
         } => {
+            // `mask_tmp` only models the architectural clobber of the mask
+            // k-register; regalloc must have assigned it the same register
+            // as `mask`.
+            debug_assert_eq!(*mask, mask_tmp.to_reg());
             avx512::emit::emit_gather(*op, *dst, *base, *index, *scale, *disp, *mask, sink);
         }
 
@@ -1859,7 +1864,10 @@ pub(crate) fn emit(
             scale,
             disp,
             mask,
+            mask_tmp,
         } => {
+            // See `Avx512Gather` above: `mask_tmp` is tied to `mask`.
+            debug_assert_eq!(*mask, mask_tmp.to_reg());
             avx512::emit::emit_scatter(*op, *src, *base, *index, *scale, *disp, *mask, sink);
         }
 

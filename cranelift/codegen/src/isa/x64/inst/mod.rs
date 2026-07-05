@@ -901,10 +901,11 @@ impl PrettyPrint for Inst {
                 scale,
                 disp,
                 mask,
+                mask_tmp: _,
             } => {
-                let dst = pretty_print_reg(dst.to_reg(), 64);
+                let dst = pretty_print_zmm_reg(dst.to_reg());
                 let base = pretty_print_reg(*base, 8);
-                let index = pretty_print_reg(*index, 64);
+                let index = pretty_print_zmm_reg(*index);
                 let mask = pretty_print_reg(*mask, 8);
                 format!(
                     "{} {dst} {{{mask}}}, [{base} + {index}*{scale} + {disp}]",
@@ -920,10 +921,11 @@ impl PrettyPrint for Inst {
                 scale,
                 disp,
                 mask,
+                mask_tmp: _,
             } => {
-                let src = pretty_print_reg(*src, 64);
+                let src = pretty_print_zmm_reg(*src);
                 let base = pretty_print_reg(*base, 8);
-                let index = pretty_print_reg(*index, 64);
+                let index = pretty_print_zmm_reg(*index);
                 let mask = pretty_print_reg(*mask, 8);
                 format!(
                     "{} [{base} + {index}*{scale} + {disp}] {{{mask}}}, {src}",
@@ -948,6 +950,19 @@ impl PrettyPrint for Inst {
                 format!("{inst}")
             }
         }
+    }
+}
+
+/// Pretty-print a 512-bit vector register operand as `%zmmN`.
+///
+/// `pretty_print_reg` prints real `RegClass::Float` registers as `%xmmN`
+/// regardless of the requested size, which is misleading for the manual
+/// AVX-512 instructions that always operate on full ZMM registers. Virtual
+/// registers fall back to the default printing.
+fn pretty_print_zmm_reg(reg: Reg) -> String {
+    match reg.to_real_reg() {
+        Some(rreg) if rreg.class() == RegClass::Float => format!("%zmm{}", rreg.hw_enc()),
+        _ => pretty_print_reg(reg, 64),
     }
 }
 
@@ -1332,12 +1347,19 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             base,
             index,
             mask,
+            mask_tmp,
             ..
         } => {
             collector.reg_early_def(dst);
             collector.reg_use(base);
             collector.reg_use(index);
             collector.reg_use(mask);
+            // VPGATHER* architecturally zeroes the mask k-register as
+            // elements complete, so the mask value does not survive the
+            // instruction. Model the clobber as a dead def tied to the mask
+            // operand (operand index 3 above), the same read+reuse-def
+            // pattern the assembler DSL uses for `PairedMask`.
+            collector.reg_reuse_def(mask_tmp, 3);
         }
 
         Inst::Avx512Scatter {
@@ -1345,12 +1367,16 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
             base,
             index,
             mask,
+            mask_tmp,
             ..
         } => {
             collector.reg_use(src);
             collector.reg_use(base);
             collector.reg_use(index);
             collector.reg_use(mask);
+            // VPSCATTER* zeroes the mask k-register as elements complete,
+            // just like VPGATHER*; see the comment above.
+            collector.reg_reuse_def(mask_tmp, 3);
         }
 
         Inst::Avx512Vp2Intersect {

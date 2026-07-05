@@ -298,6 +298,83 @@ impl EvexPrefix {
     }
 }
 
+/// An EVEX memory-operand displacement, after compressed-displacement
+/// (disp8*N) classification.
+///
+/// EVEX-encoded instructions never use a raw 8-bit displacement. Per Intel
+/// SDM Vol. 2A §2.7.5, an 8-bit displacement is always *compressed*: the
+/// byte stored in the instruction is `disp / N`, and the hardware multiplies
+/// it back by N when computing the effective address. For gather/scatter
+/// (Tuple1 Scalar), N is the element size in bytes (4 for dword elements, 8
+/// for qword elements).
+///
+/// This type is the only way displacement bytes get emitted for the
+/// hand-written EVEX paths (gather/scatter): `EvexDisp::new` performs the
+/// scaling and range checks, so it is impossible to accidentally emit a raw
+/// displacement as disp8 (which the hardware would silently multiply by N).
+///
+/// The assembler DSL has its own equivalent in `cranelift-assembler-x64`
+/// (`rex::Disp::new` with `evex_scaling`), but that type is not exported and
+/// the manual VSIB emission here does not go through the DSL.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvexDisp {
+    /// No displacement bytes (ModRM.mod = 0b00).
+    None,
+    /// Compressed 8-bit displacement (ModRM.mod = 0b01). `scaled` is the
+    /// *already-scaled* value (`raw_disp / N`); it is emitted as-is and the
+    /// hardware multiplies it by N.
+    Disp8 {
+        /// The compressed displacement byte: `raw_disp / N`.
+        scaled: i8,
+    },
+    /// Full 32-bit displacement (ModRM.mod = 0b10), *not* scaled.
+    Disp32(i32),
+}
+
+impl EvexDisp {
+    /// Classify the raw byte displacement `disp` for an EVEX memory operand
+    /// with compressed-displacement scaling factor `n` (must be non-zero;
+    /// the element size for gather/scatter).
+    ///
+    /// `base_enc` is the hardware encoding of the base register. With
+    /// ModRM.mod = 0b00 and a SIB byte, a base whose low three bits are 101
+    /// (RBP/R13) means "no base, disp32 follows", so such bases must always
+    /// carry an explicit displacement even when it is zero.
+    pub fn new(disp: i32, n: u8, base_enc: u8) -> Self {
+        debug_assert!(n != 0, "EVEX compressed-displacement factor must be non-zero");
+        if disp == 0 && (base_enc & 0x07) != 5 {
+            return Self::None;
+        }
+        let n = i32::from(n);
+        if disp % n == 0 {
+            if let Ok(scaled) = i8::try_from(disp / n) {
+                return Self::Disp8 { scaled };
+            }
+        }
+        Self::Disp32(disp)
+    }
+
+    /// The ModRM.mod field value (0b00, 0b01, or 0b10) selecting this
+    /// displacement form.
+    pub fn mod_bits(&self) -> u8 {
+        match self {
+            Self::None => 0b00,
+            Self::Disp8 { .. } => 0b01,
+            Self::Disp32(..) => 0b10,
+        }
+    }
+
+    /// Emit the displacement bytes. Must be called directly after the
+    /// ModRM/SIB bytes, whose mod field must be `self.mod_bits()`.
+    pub fn emit(&self, sink: &mut MachBuffer<Inst>) {
+        match *self {
+            Self::None => {}
+            Self::Disp8 { scaled } => sink.put1(scaled as u8),
+            Self::Disp32(disp) => sink.put4(disp as u32),
+        }
+    }
+}
+
 impl EvexPrefix {
     /// Create an EVEX prefix for a 512-bit AVX-512 operation with default settings.
     pub fn new_512bit(map: u8, w: bool, pp: u8) -> Self {
@@ -541,6 +618,64 @@ mod tests {
     // =========================================================================
     // EVEX Vector Length Tests
     // =========================================================================
+
+    // =========================================================================
+    // EVEX Compressed Displacement (disp8*N) Classification Tests
+    // =========================================================================
+
+    #[test]
+    fn test_evex_disp_none_for_zero_disp() {
+        // rdi (enc 7) base, zero displacement: no displacement bytes.
+        assert_eq!(EvexDisp::new(0, 4, 7), EvexDisp::None);
+        assert_eq!(EvexDisp::new(0, 8, 0), EvexDisp::None);
+    }
+
+    #[test]
+    fn test_evex_disp_rbp_r13_base_needs_explicit_disp() {
+        // RBP (enc 5) and R13 (enc 13) cannot use mod=00 with a SIB byte;
+        // a zero displacement must be encoded as compressed disp8 of 0.
+        assert_eq!(EvexDisp::new(0, 4, 5), EvexDisp::Disp8 { scaled: 0 });
+        assert_eq!(EvexDisp::new(0, 8, 13), EvexDisp::Disp8 { scaled: 0 });
+    }
+
+    #[test]
+    fn test_evex_disp_disp8_is_scaled() {
+        // The emitted disp8 byte is disp / N, never the raw displacement.
+        assert_eq!(EvexDisp::new(4, 4, 7), EvexDisp::Disp8 { scaled: 1 });
+        assert_eq!(EvexDisp::new(8, 4, 7), EvexDisp::Disp8 { scaled: 2 });
+        assert_eq!(EvexDisp::new(64, 4, 7), EvexDisp::Disp8 { scaled: 16 });
+        assert_eq!(EvexDisp::new(-8, 4, 7), EvexDisp::Disp8 { scaled: -2 });
+        assert_eq!(EvexDisp::new(8, 8, 7), EvexDisp::Disp8 { scaled: 1 });
+        // Extremes of the scaled i8 range.
+        assert_eq!(EvexDisp::new(127 * 4, 4, 7), EvexDisp::Disp8 { scaled: 127 });
+        assert_eq!(
+            EvexDisp::new(-128 * 8, 8, 7),
+            EvexDisp::Disp8 { scaled: -128 }
+        );
+    }
+
+    #[test]
+    fn test_evex_disp_unaligned_uses_disp32() {
+        // Displacements not divisible by N cannot be compressed.
+        assert_eq!(EvexDisp::new(127, 4, 7), EvexDisp::Disp32(127));
+        assert_eq!(EvexDisp::new(2, 4, 7), EvexDisp::Disp32(2));
+        assert_eq!(EvexDisp::new(4, 8, 7), EvexDisp::Disp32(4));
+    }
+
+    #[test]
+    fn test_evex_disp_out_of_range_uses_disp32() {
+        // Scaled value must fit in i8; 512/4 = 128 does not.
+        assert_eq!(EvexDisp::new(512, 4, 7), EvexDisp::Disp32(512));
+        assert_eq!(EvexDisp::new(128, 1, 7), EvexDisp::Disp32(128));
+        assert_eq!(EvexDisp::new(-129 * 8, 8, 7), EvexDisp::Disp32(-129 * 8));
+    }
+
+    #[test]
+    fn test_evex_disp_mod_bits() {
+        assert_eq!(EvexDisp::None.mod_bits(), 0b00);
+        assert_eq!(EvexDisp::Disp8 { scaled: 1 }.mod_bits(), 0b01);
+        assert_eq!(EvexDisp::Disp32(4).mod_bits(), 0b10);
+    }
 
     #[test]
     fn test_evex_vector_length_constants() {
