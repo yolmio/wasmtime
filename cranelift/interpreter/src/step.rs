@@ -1371,6 +1371,7 @@ where
         Opcode::X86SimdMaskedStore => unimplemented!("X86SimdMaskedStore"),
         Opcode::X86SimdCompress => unimplemented!("X86SimdCompress"),
         Opcode::X86SimdExpand => unimplemented!("X86SimdExpand"),
+        Opcode::X86SimdVp2intersectMask => unimplemented!("X86SimdVp2intersectMask"),
         Opcode::X86Vpsllv => unimplemented!("X86Vpsllv"),
         Opcode::X86Vpsrlv => unimplemented!("X86Vpsrlv"),
         Opcode::X86Vpsrav => unimplemented!("X86Vpsrav"),

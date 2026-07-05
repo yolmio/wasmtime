@@ -371,6 +371,35 @@
       (x64_512_vpexpandq_reg (put_in_reg mask) value))
 
 ;; =============================================================================
+;; AVX-512 VP2INTERSECT (x86_simd_vp2intersect_mask)
+;; =============================================================================
+;;
+;; VP2INTERSECTD/Q + VPMOVM2D/Q: per-lane set-membership mask.
+;;
+;; VP2INTERSECT writes an even/odd k-register PAIR (the fixed k6/k7 pair; see
+;; `x64_512_vp2intersectd` in inst.isle). The first (a-side) mask has bit i
+;; set iff a[i] equals any lane of b; it is expanded to a 0/-1 vector mask
+;; with VPMOVM2D/Q. The b-side mask is intentionally not exposed; swap the
+;; operands to obtain it.
+;;
+;; Gating: VP2INTERSECT is its own CPUID feature on top of AVX-512F, hence
+;; the double flag check. VPMOVM2D/Q formally require AVX-512DQ, which needs
+;; no extra check here: this backend rejects `has_avx512f` without
+;; BW/DQ/VL at construction time (see `isa/x64/mod.rs`), i.e. F implies DQ.
+
+;; I32X16 -> VP2INTERSECTD k6/k7 + VPMOVM2D from k6
+(rule 17 (lower (has_type (multi_lane 32 16) (x86_simd_vp2intersect_mask a b)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512vp2intersect))
+      (x64_512_kreg_to_vec_mask_32 (x64_512_vp2intersectd (put_in_xmm a) (put_in_xmm b))))
+
+;; I64X8 -> VP2INTERSECTQ k6/k7 + VPMOVM2Q from k6
+(rule 17 (lower (has_type (multi_lane 64 8) (x86_simd_vp2intersect_mask a b)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512vp2intersect))
+      (x64_512_kreg_to_vec_mask_64 (x64_512_vp2intersectq (put_in_xmm a) (put_in_xmm b))))
+
+;; =============================================================================
 ;; AVX-512 Masked Load (x86_simd_masked_load)
 ;; =============================================================================
 ;;
@@ -1207,6 +1236,105 @@
             (cond_inv Xmm (x64_512_vpxord cond_xmm (x64_512_all_ones_32)))
             (b Xmm (x64_512_vpandd false_xmm cond_inv)))
         (x64_512_vpord a b)))
+
+;; =============================================================================
+;; 512-bit 3-input Boolean Fusion (VPTERNLOGD/Q)
+;; =============================================================================
+;;
+;; Fuse common 3-input boolean trees over 512-bit integer vectors into a
+;; single VPTERNLOG. These are pure bitwise operations, so all four integer
+;; types are covered: I64X8 uses VPTERNLOGQ, everything else VPTERNLOGD (lane
+;; size is irrelevant to a bitwise op; see `x64_512_vpternlog_fused`).
+;;
+;; imm8 derivation: bit i of imm8 = f(A, B, C) where A = bit 2, B = bit 1,
+;; C = bit 0 of i. Equivalently, compute f over the byte masks A = 0xF0,
+;; B = 0xCC, C = 0xAA. Operand mapping is always A = a, B = b, C = c as bound
+;; by the pattern, and A (the first constructor argument) lands in the
+;; tied/RMW slot: VPTERNLOG overwrites its first operand, so `a` is the input
+;; that gets consumed (regalloc inserts a copy if `a` is live afterwards)
+;; while b and c stay readable in their registers.
+;;
+;; Priorities: 19 (left-nested) and 20 (right-nested) so that
+;;  - they outprioritize the single-op VPAND/VPOR/VPXOR rules at 17 and the
+;;    band(x, bnot(y)) -> VPANDN fusion at 18,
+;;  - the two nesting variants of one shape never overlap at the same
+;;    priority (e.g. bxor(bxor(a,b), bxor(c,d)) matches both), and
+;;  - the bitselect->VPTERNLOG rules at 16 (root: `bitselect`) are untouched.
+;; The commuted forms (inner op as the *second* argument of the root) are
+;; exactly the right-nested rules, so both operand orders are covered.
+;; No rule can recurse: the constructors consume already-lowered `Xmm`
+;; values, never re-entering `lower`.
+;;
+;; Only shapes the mid-end actually produces are matched. `band_not` is
+;; legalized to band(x, bnot(y)) before lowering and is already fused to
+;; VPANDN at priorities 18/26; deeper bnot-composites (e.g.
+;; band(a, bnot(bor(b, c)))) were not observed coming out of the egraph, so
+;; no speculative rules exist for them.
+
+;; xor3: bxor(bxor(a, b), c) => A^B^C
+;; imm8 = 0xF0 ^ 0xCC ^ 0xAA = 0x96 (invariant under operand permutation)
+(rule 19 (lower (has_type ty (bxor (bxor a b) c)))
+      (if-let true (has_avx512f))
+      (if-let _ (ty_vec512_int ty))
+      (x64_512_vpternlog_fused ty (put_in_xmm a) (put_in_xmm b) (put_in_xmm_mem c) 0x96))
+
+;; xor3, right-nested: bxor(a, bxor(b, c)) => A^B^C, imm8 = 0x96
+(rule 20 (lower (has_type ty (bxor a (bxor b c))))
+      (if-let true (has_avx512f))
+      (if-let _ (ty_vec512_int ty))
+      (x64_512_vpternlog_fused ty (put_in_xmm a) (put_in_xmm b) (put_in_xmm_mem c) 0x96))
+
+;; and3: band(band(a, b), c) => A&B&C
+;; imm8 = 0xF0 & 0xCC & 0xAA = 0x80 (invariant under operand permutation)
+(rule 19 (lower (has_type ty (band (band a b) c)))
+      (if-let true (has_avx512f))
+      (if-let _ (ty_vec512_int ty))
+      (x64_512_vpternlog_fused ty (put_in_xmm a) (put_in_xmm b) (put_in_xmm_mem c) 0x80))
+
+;; and3, right-nested: band(a, band(b, c)) => A&B&C, imm8 = 0x80
+(rule 20 (lower (has_type ty (band a (band b c))))
+      (if-let true (has_avx512f))
+      (if-let _ (ty_vec512_int ty))
+      (x64_512_vpternlog_fused ty (put_in_xmm a) (put_in_xmm b) (put_in_xmm_mem c) 0x80))
+
+;; or3: bor(bor(a, b), c) => A|B|C
+;; imm8 = 0xF0 | 0xCC | 0xAA = 0xFE (invariant under operand permutation)
+(rule 19 (lower (has_type ty (bor (bor a b) c)))
+      (if-let true (has_avx512f))
+      (if-let _ (ty_vec512_int ty))
+      (x64_512_vpternlog_fused ty (put_in_xmm a) (put_in_xmm b) (put_in_xmm_mem c) 0xFE))
+
+;; or3, right-nested: bor(a, bor(b, c)) => A|B|C, imm8 = 0xFE
+(rule 20 (lower (has_type ty (bor a (bor b c))))
+      (if-let true (has_avx512f))
+      (if-let _ (ty_vec512_int ty))
+      (x64_512_vpternlog_fused ty (put_in_xmm a) (put_in_xmm b) (put_in_xmm_mem c) 0xFE))
+
+;; and-or: bor(band(a, b), c) => (A&B)|C
+;; imm8 = (0xF0 & 0xCC) | 0xAA = 0xC0 | 0xAA = 0xEA
+(rule 19 (lower (has_type ty (bor (band a b) c)))
+      (if-let true (has_avx512f))
+      (if-let _ (ty_vec512_int ty))
+      (x64_512_vpternlog_fused ty (put_in_xmm a) (put_in_xmm b) (put_in_xmm_mem c) 0xEA))
+
+;; and-or, commuted root: bor(c, band(a, b)) => (A&B)|C, imm8 = 0xEA
+(rule 20 (lower (has_type ty (bor c (band a b))))
+      (if-let true (has_avx512f))
+      (if-let _ (ty_vec512_int ty))
+      (x64_512_vpternlog_fused ty (put_in_xmm a) (put_in_xmm b) (put_in_xmm_mem c) 0xEA))
+
+;; or-and: band(bor(a, b), c) => (A|B)&C
+;; imm8 = (0xF0 | 0xCC) & 0xAA = 0xFC & 0xAA = 0xA8
+(rule 19 (lower (has_type ty (band (bor a b) c)))
+      (if-let true (has_avx512f))
+      (if-let _ (ty_vec512_int ty))
+      (x64_512_vpternlog_fused ty (put_in_xmm a) (put_in_xmm b) (put_in_xmm_mem c) 0xA8))
+
+;; or-and, commuted root: band(c, bor(a, b)) => (A|B)&C, imm8 = 0xA8
+(rule 20 (lower (has_type ty (band c (bor a b))))
+      (if-let true (has_avx512f))
+      (if-let _ (ty_vec512_int ty))
+      (x64_512_vpternlog_fused ty (put_in_xmm a) (put_in_xmm b) (put_in_xmm_mem c) 0xA8))
 
 ;; =============================================================================
 ;; 512-bit Count Leading Zeros (VPLZCNTD/Q - AVX-512CD)

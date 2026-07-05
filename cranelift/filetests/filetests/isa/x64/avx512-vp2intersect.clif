@@ -1,0 +1,157 @@
+test compile precise-output
+target x86_64 has_avx512f has_avx512bw has_avx512dq has_avx512vl has_avx512vp2intersect
+
+;; x86_simd_vp2intersect_mask: per-lane set-membership mask.
+;;
+;; Lowering: VP2INTERSECTD/Q writing the fixed k6/k7 pair (both halves are
+;; fixed-reg defs; the b-side mask in k7 is a modeled dead def), then
+;; VPMOVM2D/Q expands the a-side mask (k6) to a 0/-1 vector.
+
+function %vp2intersect_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = x86_simd_vp2intersect_mask v0, v1
+    return v2
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vp2intersectd %k6/%k7 (pair %k6/%k7), %zmm0, %zmm1
+;   vpmovm2d %k6, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+
+function %vp2intersect_i64x8(i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8):
+    v2 = x86_simd_vp2intersect_mask v0, v1
+    return v2
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vp2intersectq %k6/%k7 (pair %k6/%k7), %zmm0, %zmm1
+;   vpmovm2q %k6, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+
+;; b-side mask by swapping the operands.
+function %vp2intersect_swapped_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = x86_simd_vp2intersect_mask v1, v0
+    return v2
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vp2intersectd %k6/%k7 (pair %k6/%k7), %zmm1, %zmm0
+;   vpmovm2d %k6, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+
+;; Semi-join shape: filter probe lanes by build-side membership.
+;; result = probe & membership_mask(probe, build)
+function %semi_join_filter_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = x86_simd_vp2intersect_mask v0, v1
+    v3 = band v0, v2
+    return v3
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vp2intersectd %k6/%k7 (pair %k6/%k7), %zmm0, %zmm1
+;   vpmovm2d %k6, %zmm7
+;   vpandd %zmm7, %zmm0, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+
+;; Two intersections back to back: k6/k7 must be reusable immediately.
+function %vp2intersect_twice_i64x8(i64x8, i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8, v2: i64x8):
+    v3 = x86_simd_vp2intersect_mask v0, v1
+    v4 = x86_simd_vp2intersect_mask v0, v2
+    v5 = band v3, v4
+    return v5
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vp2intersectq %k6/%k7 (pair %k6/%k7), %zmm0, %zmm1
+;   vpmovm2q %k6, %zmm1
+;   vp2intersectq %k6/%k7 (pair %k6/%k7), %zmm0, %zmm2
+;   vpmovm2q %k6, %zmm0
+;   vpandq %zmm0, %zmm1, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+
+;; The vp2intersect result feeding a k-mask consumer (bitselect) exercises
+;; interaction between the fixed k6/k7 pair defs and allocatable k-mask
+;; temps in the surrounding code.
+function %vp2intersect_bitselect_i32x16(i32x16, i32x16, i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16, v2: i32x16, v3: i32x16):
+    v4 = x86_simd_vp2intersect_mask v0, v1
+    v5 = bitselect v4, v2, v3
+    return v5
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vp2intersectd %k6/%k7 (pair %k6/%k7), %zmm0, %zmm1
+;   vpmovm2d %k6, %zmm0
+;   vpternlogd $0xca, %zmm3, %zmm2, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+

@@ -106,6 +106,9 @@ pub fn infer_native_flags(isa_builder: &mut dyn Configurable) -> Result<(), &'st
         if std::is_x86_feature_detected!("avx512cd") {
             isa_builder.enable("has_avx512cd").unwrap();
         }
+        if std::is_x86_feature_detected!("avx512vp2intersect") {
+            isa_builder.enable("has_avx512vp2intersect").unwrap();
+        }
         if std::is_x86_feature_detected!("lzcnt") {
             isa_builder.enable("has_lzcnt").unwrap();
         }

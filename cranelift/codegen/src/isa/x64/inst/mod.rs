@@ -123,8 +123,12 @@ impl Inst {
             | Inst::Avx512KmovLoad { .. }
             | Inst::Avx512KmovStore { .. }
             | Inst::Avx512Gather { .. }
-            | Inst::Avx512Scatter { .. }
-            | Inst::Avx512Vp2Intersect { .. } => emit_info.avx512f(),
+            | Inst::Avx512Scatter { .. } => emit_info.avx512f(),
+
+            // VP2INTERSECT is its own CPUID feature on top of AVX-512F.
+            Inst::Avx512Vp2Intersect { .. } => {
+                emit_info.avx512f() && emit_info.avx512vp2intersect()
+            }
 
             Inst::External { inst } => inst.is_available(&emit_info),
         }
@@ -935,15 +939,22 @@ impl PrettyPrint for Inst {
 
             Inst::Avx512Vp2Intersect {
                 op,
-                dst_k,
+                pair,
+                dst_lo,
+                dst_hi,
                 src1,
                 src2,
             } => {
-                let dst = pretty_print_reg(dst_k.to_reg(), 8);
-                let src1 = pretty_print_reg(*src1, 64);
-                let src2 = src2.pretty_print(64);
+                let dst_lo = pretty_print_reg(dst_lo.to_reg(), 8);
+                let dst_hi = pretty_print_reg(dst_hi.to_reg(), 8);
+                let src1 = pretty_print_zmm_reg(*src1);
+                let src2 = match src2 {
+                    RegMem::Reg { reg } => pretty_print_zmm_reg(*reg),
+                    mem => mem.pretty_print(64),
+                };
                 let op_name = op.name();
-                format!("{op_name} {src1}, {src2}, {dst}")
+                let pair = pair.name();
+                format!("{op_name} {dst_lo}/{dst_hi} (pair {pair}), {src1}, {src2}")
             }
 
             Inst::External { inst } => {
@@ -1380,11 +1391,24 @@ fn x64_get_operands(inst: &mut Inst, collector: &mut impl OperandVisitor) {
         }
 
         Inst::Avx512Vp2Intersect {
-            dst_k, src1, src2, ..
+            pair,
+            dst_lo,
+            dst_hi,
+            src1,
+            src2,
+            ..
         } => {
-            collector.reg_def(dst_k);
             collector.reg_use(src1);
             src2.get_operands(collector);
+            // VP2INTERSECT writes an even/odd k-register PAIR. regalloc2 has
+            // no register-pair constraint, so both halves are pinned with
+            // fixed-register defs derived from the structurally-even
+            // `KRegPair`; this keeps the whole pair free here even though
+            // only `dst_lo` is consumed by later instructions (`dst_hi` is a
+            // dead def modeling the architectural clobber of pair.high()).
+            let pair = *pair;
+            collector.reg_fixed_def(dst_lo, pair.low());
+            collector.reg_fixed_def(dst_hi, pair.high());
         }
 
         Inst::External { inst } => {
@@ -1695,6 +1719,15 @@ impl EmitInfo {
     /// Create a constant state for emission of instructions.
     pub fn new(flags: settings::Flags, isa_flags: x64_settings::Flags) -> Self {
         Self { flags, isa_flags }
+    }
+
+    /// Whether the AVX512_VP2INTERSECT extension is enabled.
+    ///
+    /// This is an inherent method (not part of `asm::AvailableFeatures`,
+    /// which is defined by the external assembler DSL) because VP2INTERSECT
+    /// is only used by the manual `Inst::Avx512Vp2Intersect` implementation.
+    fn avx512vp2intersect(&self) -> bool {
+        self.isa_flags.has_avx512vp2intersect()
     }
 }
 

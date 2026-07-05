@@ -2214,31 +2214,36 @@ fn test_vcode_bitwise_ops_used() {
         .define_function(func_id, &mut compiler.ctx)
         .unwrap();
 
-    let mut found_vpandq = false;
+    // The (src1 & src2) | (src1 ^ src2) tree now triggers the VPTERNLOG
+    // 3-input boolean fusion: bor(band(a, b), c) becomes a single
+    // `vpternlogq $0xea` consuming the band, so only the bxor remains as a
+    // standalone VPXORQ. Lock the fused codegen instead of the old
+    // three-instruction sequence.
+    let mut found_vpternlogq_ea = false;
     let mut found_vpxorq = false;
-    let mut found_vporq = false;
+    let mut vpternlog_count = 0;
 
     if let Some(compiled) = compiler.ctx.compiled_code() {
         if let Some(disasm) = &compiled.vcode {
             println!("=== VCode for vcode_bitwise ===\n{}", disasm);
             let lower = disasm.to_lowercase();
-            found_vpandq = lower.contains("vpandq");
+            found_vpternlogq_ea = lower.contains("vpternlogq $0xea");
             found_vpxorq = lower.contains("vpxorq");
-            found_vporq = lower.contains("vporq");
+            vpternlog_count = lower.matches("vpternlog").count();
         }
     }
 
     assert!(
-        found_vpandq,
-        "Expected VPANDQ instruction for I64X8 band, but it wasn't generated"
+        found_vpternlogq_ea,
+        "Expected fused `vpternlogq $0xea` for I64X8 bor(band(a,b), c), but it wasn't generated"
     );
     assert!(
         found_vpxorq,
         "Expected VPXORQ instruction for I64X8 bxor, but it wasn't generated"
     );
-    assert!(
-        found_vporq,
-        "Expected VPORQ instruction for I64X8 bor, but it wasn't generated"
+    assert_eq!(
+        vpternlog_count, 1,
+        "Expected exactly one vpternlog for the fused subtree"
     );
 }
 

@@ -1873,11 +1873,25 @@ pub(crate) fn emit(
 
         Inst::Avx512Vp2Intersect {
             op,
-            dst_k,
+            pair,
+            dst_lo,
+            dst_hi,
             src1,
             src2,
         } => {
-            avx512::emit::emit_x64_512_vp2intersect_inst(*op, *dst_k, *src1, src2, sink);
+            // The destination k-register number comes from the structurally
+            // even `pair`, not from regalloc's output; the fixed-reg
+            // constraints in `get_operands` force the allocations to match,
+            // which is cross-checked here.
+            debug_assert_eq!(
+                dst_lo.to_reg().to_real_reg().map(|r| r.hw_enc()),
+                Some(pair.low_enc())
+            );
+            debug_assert_eq!(
+                dst_hi.to_reg().to_real_reg().map(|r| r.hw_enc()),
+                Some(pair.low_enc() + 1)
+            );
+            avx512::emit::emit_x64_512_vp2intersect_inst(*op, *pair, *src1, src2, sink);
         }
 
         Inst::External { inst } => {

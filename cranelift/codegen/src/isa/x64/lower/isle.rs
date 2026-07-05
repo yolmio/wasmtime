@@ -24,7 +24,7 @@ use crate::machinst::{
     VCodeConstantData,
 };
 use alloc::vec::Vec;
-pub(crate) use avx512::{Avx512Cond, GatherOp, ScatterOp, Vp2IntersectOp};
+pub(crate) use avx512::{Avx512Cond, GatherOp, KRegPair, ScatterOp, Vp2IntersectOp};
 use cranelift_assembler_x64 as asm;
 use regalloc2::PReg;
 use alloc::boxed::Box;
@@ -294,6 +294,11 @@ impl Context for IsleContext<'_, '_, MInst, X64Backend> {
     #[inline]
     fn has_avx512cd(&mut self) -> bool {
         self.backend.x64_flags.has_avx512cd()
+    }
+
+    #[inline]
+    fn has_avx512vp2intersect(&mut self) -> bool {
+        self.backend.x64_flags.has_avx512vp2intersect()
     }
 
     // =========================================================================

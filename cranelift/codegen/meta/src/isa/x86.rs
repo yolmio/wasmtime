@@ -101,6 +101,12 @@ pub(crate) fn define() -> TargetIsa {
         "AVX512CD: CPUID.07H:EBX.AVX512CD[bit 28]",
         false,
     );
+    let _has_avx512vp2intersect = settings.add_bool(
+        "has_avx512vp2intersect",
+        "Has support for AVX512_VP2INTERSECT.",
+        "AVX512_VP2INTERSECT: CPUID.(EAX=07H, ECX=0H):EDX.AVX512_VP2INTERSECT[bit 8]",
+        false,
+    );
     let has_popcnt = settings.add_bool(
         "has_popcnt",
         "Has support for POPCNT.",

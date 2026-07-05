@@ -1026,6 +1026,47 @@ fn define_simd_memory(ig: &mut InstructionGroupBuilder, formats: &Formats, imm: 
             Operand::new("result", IxN512).with_doc("Expanded vector"),
         ]),
     );
+
+    // =========================================================================
+    // x86_simd_vp2intersect_mask - Any-lane-equality (intersection) mask
+    // =========================================================================
+    ig.push(
+        Inst::new(
+            "x86_simd_vp2intersect_mask",
+            r#"
+        Per-lane set-membership (intersection) mask (AVX-512 VP2INTERSECT).
+
+        For each lane `i` of `a`, sets result lane `i` to all-ones if the value
+        `a[i]` compares equal to *any* lane of `b`, and to all-zeros otherwise.
+        Matching is by value equality only; duplicates all match: if a value
+        appears several times in `a`, every one of those lanes is set, and a
+        lane of `a` matches whether its value appears once or many times in
+        `b`.
+
+        This exposes the FIRST (a-side) k-mask output of VP2INTERSECTD/Q,
+        expanded to a vector mask with VPMOVM2D/Q. The second (b-side) mask
+        can be obtained by swapping the operands; returning a single
+        vector-typed result keeps CLIF plumbing and register allocation
+        simple.
+
+        This is the core of a SIMD semi-join / hash-join probe: `a` holds
+        probe keys, `b` holds build-side keys, and the result mask selects the
+        probe lanes that found a match.
+
+        Requires AVX-512 VP2INTERSECT support (`has_avx512vp2intersect`).
+        "#,
+            &formats.binary,
+        )
+        .operands_in(vec![
+            Operand::new("a", IxN512)
+                .with_doc("Probe vector - each lane is tested for membership in b"),
+            Operand::new("b", IxN512).with_doc("Build vector - the set of values matched against"),
+        ])
+        .operands_out(vec![
+            Operand::new("result", IxN512)
+                .with_doc("All-ones lanes where a's lane value is present anywhere in b"),
+        ]),
+    );
 }
 
 pub(crate) fn define(

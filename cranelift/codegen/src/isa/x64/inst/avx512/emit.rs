@@ -39,8 +39,8 @@ use super::super::args::{Amode, OperandSize, SyntheticAmode, Xmm};
 use super::defs::{
     Avx512AlignOp, Avx512AluOp, Avx512Cond, Avx512CvtOp, Avx512ExtractOp, Avx512FmaOp,
     Avx512FpAluOp, Avx512FpSpecialOp, Avx512ImmShuffleOp, Avx512InsertOp, Avx512LaneShuffleOp,
-    Avx512VnniOp, MaskAddOp, MaskAluOp, MaskShiftOp, MaskTestOp, MaskUnpackOp, MergeMode,
-    Vp2IntersectOp,
+    Avx512VnniOp, KRegPair, MaskAddOp, MaskAluOp, MaskShiftOp, MaskTestOp, MaskUnpackOp,
+    MergeMode, Vp2IntersectOp,
 };
 use super::encoding::*;
 use crate::isa::x64::inst::Inst;
@@ -1431,20 +1431,28 @@ pub fn emit_x64_512_vnni_inst(
 /// Emit a VP2INTERSECT instruction for hash join acceleration.
 ///
 /// VP2INTERSECT compares two vectors and outputs TWO mask registers:
-/// - dst_k: For each element in src1, set bit if it matches ANY element in src2
-/// - dst_k+1: For each element in src2, set bit if it matches ANY element in src1
+/// - pair.low(): For each element in src1, set bit if it matches ANY element in src2
+/// - pair.high(): For each element in src2, set bit if it matches ANY element in src1
 ///
-/// The dst_k register MUST be an even k-register (k0, k2, k4, k6).
+/// The destination is a [`KRegPair`], an even/odd adjacent k-register pair
+/// *by construction*: the SDM requires the encoded destination to be even
+/// (hardware ignores the LSB of the ModR/M reg field and writes k[2n] and
+/// k[2n+1]), and taking the pair type instead of an arbitrary register makes
+/// an odd destination unrepresentable rather than merely debug-asserted.
 ///
-/// Encoding:
-///   VP2INTERSECTD: EVEX.NDS.512.F2.0F38.W0 68 /r
-///   VP2INTERSECTQ: EVEX.NDS.512.F2.0F38.W1 68 /r
+/// Encoding (Intel SDM):
+///   VP2INTERSECTD zmm-form: EVEX.NDS.512.F2.0F38.W0 68 /r
+///   VP2INTERSECTQ zmm-form: EVEX.NDS.512.F2.0F38.W1 68 /r
 ///
 /// Note: Unlike most instructions, the reg field in ModR/M encodes a k-register,
 /// not a ZMM register. The vvvv field holds src1 (ZMM), r/m holds src2 (ZMM/mem).
+///
+/// Byte-exact reference (cross-checked against GNU as/objdump):
+///   vp2intersectd %zmm2, %zmm1, %k6 => 62 F2 77 48 68 F2
+///   vp2intersectq %zmm2, %zmm1, %k6 => 62 F2 F7 48 68 F2
 pub fn emit_x64_512_vp2intersect_inst(
     op: Vp2IntersectOp,
-    dst_k: Writable<Reg>,
+    pair: KRegPair,
     src1: Reg,
     src2: &RegMem,
     sink: &mut MachBuffer<Inst>,
@@ -1459,18 +1467,10 @@ pub fn emit_x64_512_vp2intersect_inst(
         ll: 0b10,           // 512-bit
     };
 
-    // VP2INTERSECT uses k-register in the reg field
-    // The dst_k must be an even k-register (k0, k2, k4, k6)
-    let dst_enc = dst_k.to_reg().to_real_reg().unwrap().hw_enc();
-
-    // Debug check: ensure dst is an even k-register
-    #[cfg(debug_assertions)]
-    {
-        debug_assert!(
-            dst_enc % 2 == 0,
-            "VP2INTERSECT dst_k must be an even k-register (k0, k2, k4, k6), got k{dst_enc}"
-        );
-    }
+    // The ModR/M reg field encodes the destination pair via its low
+    // register; `KRegPair::low_enc` is structurally even, so no evenness
+    // assertion is needed here.
+    let dst_enc = pair.low_enc();
 
     let src1_enc = src1.to_real_reg().unwrap().hw_enc();
 
@@ -1480,7 +1480,7 @@ pub fn emit_x64_512_vp2intersect_inst(
             // For VP2INTERSECT:
             // - EVEX.R/R' controls reg field extension (but k-regs only need 3 bits: k0-k7)
             // - EVEX.vvvv = src1 (inverted, ZMM register)
-            // - ModR/M.reg = dst_k (k-register, 3 bits)
+            // - ModR/M.reg = pair.low() (even k-register, 3 bits)
             // - ModR/M.r/m = src2 (ZMM register)
             evex.emit(dst_enc, src1_enc, src2_enc, false, sink);
             sink.put1(op.opcode()); // 0x68
@@ -2845,5 +2845,68 @@ mod tests {
         // vpgatherdq zmm1 {k1}, [rdi + ymm2*1 + 16]: N is the *element* size
         // (8 for dq), not the index size, so disp8 = 16/8 = 2.
         assert_eq!(gather_bytes(GatherOp::Vpgatherdq, 1, 16), "62F2FD49904C1702");
+    }
+
+    // =========================================================================
+    // VP2INTERSECT Encoding Tests (byte-exact)
+    //
+    // VP2INTERSECTD zmm-form: EVEX.NDS.512.F2.0F38.W0 68 /r (note the F2
+    // prefix, pp=0b11). The ModR/M reg field encodes the destination
+    // k-register PAIR via its even low register; the hardware ignores the
+    // LSB. Expected byte sequences below were produced with GNU as and
+    // verified with objdump:
+    //
+    //   vp2intersectd %zmm2, %zmm1, %k6   => 62 f2 77 48 68 f2
+    //   vp2intersectq %zmm2, %zmm1, %k6   => 62 f2 f7 48 68 f2
+    //   vp2intersectd %zmm2, %zmm1, %k4   => 62 f2 77 48 68 e2
+    //   vp2intersectd %zmm10, %zmm9, %k6  => 62 d2 37 48 68 f2
+    // =========================================================================
+
+    /// Emit `vp2intersect{d,q} pair.low(), src1, src2` (register form) and
+    /// return the emitted bytes as an uppercase hex string.
+    fn vp2intersect_bytes(op: Vp2IntersectOp, pair: KRegPair, src1: Reg, src2: Reg) -> String {
+        let mut sink = MachBuffer::<Inst>::new();
+        emit_x64_512_vp2intersect_inst(op, pair, src1, &RegMem::Reg { reg: src2 }, &mut sink);
+        let buf = sink.finish(&Default::default(), &mut Default::default());
+        hex(buf.data())
+    }
+
+    #[test]
+    fn test_vp2intersect_encoding() {
+        use Vp2IntersectOp::{Vp2intersectd, Vp2intersectq};
+        // vp2intersectd k6, zmm1, zmm2
+        assert_eq!(
+            vp2intersect_bytes(Vp2intersectd, KRegPair::K6K7, regs::xmm1(), regs::xmm2()),
+            "62F2774868F2"
+        );
+        // vp2intersectq k6, zmm1, zmm2 (W=1)
+        assert_eq!(
+            vp2intersect_bytes(Vp2intersectq, KRegPair::K6K7, regs::xmm1(), regs::xmm2()),
+            "62F2F74868F2"
+        );
+        // vp2intersectd k4, zmm1, zmm2 (different pair -> ModRM.reg)
+        assert_eq!(
+            vp2intersect_bytes(Vp2intersectd, KRegPair::K4K5, regs::xmm1(), regs::xmm2()),
+            "62F2774868E2"
+        );
+        // vp2intersectd k6, zmm9, zmm10 (EVEX.B extension for src2, vvvv=~9)
+        assert_eq!(
+            vp2intersect_bytes(Vp2intersectd, KRegPair::K6K7, regs::xmm9(), regs::xmm10()),
+            "62D2374868F2"
+        );
+    }
+
+    #[test]
+    fn test_kreg_pair_structurally_even() {
+        // The KRegPair type admits only even/odd adjacent pairs over the
+        // allocatable k2-k7; verify the accessors agree with each other.
+        for pair in [KRegPair::K2K3, KRegPair::K4K5, KRegPair::K6K7] {
+            assert_eq!(pair.low_enc() % 2, 0, "low k-register must be even");
+            assert_eq!(pair.low().to_real_reg().unwrap().hw_enc(), pair.low_enc());
+            assert_eq!(
+                pair.high().to_real_reg().unwrap().hw_enc(),
+                pair.low_enc() + 1
+            );
+        }
     }
 }

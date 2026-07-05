@@ -366,9 +366,20 @@
 
        ;; VP2INTERSECT - Hash join acceleration
        ;; Compares two vectors and outputs TWO consecutive mask registers
-       ;; Requires dual k-register output (not supported by DSL)
+       ;; (not supported by the assembler DSL, which has no dual-def k-reg
+       ;; pair concept).
+       ;;
+       ;; regalloc2 has no register-pair support, so the destination pair is
+       ;; pinned: `pair` (a `KRegPair`, structurally an even/odd adjacent
+       ;; pair) names the two physical k-registers, and `dst_lo`/`dst_hi` are
+       ;; virtual k-mask defs constrained via `reg_fixed_def` to `pair.low()`
+       ;; and `pair.high()` respectively. Emission takes the k-register
+       ;; number from `pair`, never from an allocator-chosen register, so an
+       ;; odd destination is unrepresentable.
        (Avx512Vp2Intersect (op Vp2IntersectOp)
-                          (dst_k WritableReg)
+                          (pair KRegPair)
+                          (dst_lo WritableReg)
+                          (dst_hi WritableReg)
                           (src1 Reg)
                           (src2 RegMem))
 
@@ -780,6 +791,15 @@
       (enum Vp2intersectd
             Vp2intersectq))
 
+;; AVX-512: an even-aligned adjacent pair of allocatable k-registers.
+;; VP2INTERSECT writes two consecutive mask registers and requires the low
+;; one to be even; this type makes invalid pairs unrepresentable (see
+;; `KRegPair` in `inst/avx512/defs.rs`).
+(type KRegPair extern
+      (enum K2K3
+            K4K5
+            K6K7))
+
 ;; AVX-512 Gather operations (manual MInst - requires VSIB addressing)
 (type GatherOp extern
       (enum Vpgatherdd
@@ -1115,6 +1135,9 @@
 
 (decl pure has_avx512bitalg () bool)
 (extern constructor has_avx512bitalg has_avx512bitalg)
+
+(decl pure has_avx512vp2intersect () bool)
+(extern constructor has_avx512vp2intersect has_avx512vp2intersect)
 
 (decl pure has_avx512vbmi () bool)
 (extern constructor has_avx512vbmi has_avx512vbmi)
@@ -5537,27 +5560,43 @@
 ;; Produces TWO mask outputs (consecutive k-registers):
 ;; - First mask (returned): For each element in src1, set if it matches ANY element in src2
 ;; - Second mask (dst+1): For each element in src2, set if it matches ANY element in src1
-;; Note: The hardware implicitly writes to both dst_k and dst_k+1.
-;; dst_k must be an even k-register (k0, k2, k4, k6).
-(decl x64_512_vp2intersectd (Xmm XmmMem) Reg)
+;;
+;; The hardware writes the even/odd k-register pair named by the `KRegPair`
+;; operand; both halves are modeled as fixed-preg defs so regalloc keeps the
+;; whole pair free across this instruction (regalloc2 has no pair support).
+;; We pin k6/k7: any of the three allocatable even pairs works, and using the
+;; highest pair keeps the lower k-registers free for the surrounding code's
+;; short-lived mask temps. Only the low (a-side) mask is returned; the b-side
+;; mask is obtainable by swapping the operands.
+;;
+;; src2 is register-only on purpose: the memory path of the manual
+;; VP2INTERSECT emitter is not exercised by any lowering rule and stays that
+;; way until it has byte-exact tests.
+(decl x64_512_vp2intersectd (Xmm Xmm) Reg)
 (rule (x64_512_vp2intersectd src1 src2)
-      (let ((dst WritableReg (temp_writable_reg $I64))
+      (let ((dst_lo WritableKmask (temp_writable_kmask))
+            (dst_hi WritableKmask (temp_writable_kmask))
             (_ Unit (emit (MInst.Avx512Vp2Intersect (Vp2IntersectOp.Vp2intersectd)
-                                                    dst
+                                                    (KRegPair.K6K7)
+                                                    (writable_kmask_to_writable_reg dst_lo)
+                                                    (writable_kmask_to_writable_reg dst_hi)
                                                     src1
-                                                    src2))))
-        dst))
+                                                    (RegMem.Reg src2)))))
+        (kmask_to_reg (writable_kmask_to_kmask dst_lo))))
 
 ;; VP2INTERSECTQ - Compare 64-bit elements from two vectors
-;; Same semantics as VP2INTERSECTD but for 64-bit elements.
-(decl x64_512_vp2intersectq (Xmm XmmMem) Reg)
+;; Same semantics and register-pair modeling as VP2INTERSECTD.
+(decl x64_512_vp2intersectq (Xmm Xmm) Reg)
 (rule (x64_512_vp2intersectq src1 src2)
-      (let ((dst WritableReg (temp_writable_reg $I64))
+      (let ((dst_lo WritableKmask (temp_writable_kmask))
+            (dst_hi WritableKmask (temp_writable_kmask))
             (_ Unit (emit (MInst.Avx512Vp2Intersect (Vp2IntersectOp.Vp2intersectq)
-                                                    dst
+                                                    (KRegPair.K6K7)
+                                                    (writable_kmask_to_writable_reg dst_lo)
+                                                    (writable_kmask_to_writable_reg dst_hi)
                                                     src1
-                                                    src2))))
-        dst))
+                                                    (RegMem.Reg src2)))))
+        (kmask_to_reg (writable_kmask_to_kmask dst_lo))))
 
 ;; =============================================================================
 ;; Type Conversion helpers (VCVTDQ2PS, VCVTPS2DQ, etc.)
@@ -5645,6 +5684,33 @@
 (decl x64_512_vpternlogq (Xmm Xmm XmmMem u8) Xmm)
 (rule (x64_512_vpternlogq src1 src2 src3 imm8)
       (x64_vpternlogq_z_ternlog src1 src2 src3 imm8))
+
+;; Type-dispatched VPTERNLOG for fused 3-input boolean trees on 512-bit
+;; integer vectors. VPTERNLOG is a pure bitwise operation, so the lane size
+;; encoded in the mnemonic is irrelevant for the result: I64X8 uses
+;; VPTERNLOGQ (native lane width), everything else (I32X16, I16X32, I8X64)
+;; uses VPTERNLOGD. The only user-visible difference between D and Q forms
+;; is masked/broadcast behavior, which these fused forms never use.
+;;
+;; Operand roles follow the hardware truth-table convention:
+;;   src1 = A (0xF0 byte mask), src2 = B (0xCC), src3 = C (0xAA)
+;; and src1/A is the tied (read-modify-write) operand: the instruction
+;; overwrites it, so regalloc copies it first if it is live afterwards,
+;; while B and C stay untouched in their registers.
+(decl x64_512_vpternlog_fused (Type Xmm Xmm XmmMem u8) Xmm)
+(rule 1 (x64_512_vpternlog_fused $I64X8 a b c imm8)
+      (x64_512_vpternlogq a b c imm8))
+(rule 0 (x64_512_vpternlog_fused _ty a b c imm8)
+      (x64_512_vpternlogd a b c imm8))
+
+;; Accepts exactly the 512-bit integer vector types the AVX-512 backend
+;; lowers with full-width instructions; fails for anything else. Used as an
+;; `if-let` guard by type-generic 512-bit lowering rules.
+(decl pure partial ty_vec512_int (Type) Type)
+(rule (ty_vec512_int $I8X64) $I8X64)
+(rule (ty_vec512_int $I16X32) $I16X32)
+(rule (ty_vec512_int $I32X16) $I32X16)
+(rule (ty_vec512_int $I64X8) $I64X8)
 
 ;; =============================================================================
 ;; Register-form Compress/Expand helpers

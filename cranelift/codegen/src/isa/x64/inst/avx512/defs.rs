@@ -2281,6 +2281,73 @@ pub enum Vp2IntersectOp {
     Vp2intersectq,
 }
 
+/// An even-aligned, adjacent pair of *allocatable* AVX-512 mask registers.
+///
+/// VP2INTERSECTD/Q writes TWO consecutive k-registers: the destination
+/// encoded in ModRM.reg (whose LSB is ignored by hardware, i.e. it must be
+/// even) and its odd successor. regalloc2 has no native register-pair
+/// support, so instructions that need the pair pin both halves with fixed
+/// constraints derived from this type.
+///
+/// Type-safety invariant: the only inhabitants are the three even/odd
+/// adjacent pairs among the allocatable mask registers k2-k7 (k0 is the
+/// hardwired "no mask" register and k1 is reserved as the pinned
+/// gather/scatter mask; neither is in the register allocator's `MachineEnv`).
+/// An odd-based or non-adjacent pair is unrepresentable, so evenness never
+/// needs to be `debug_assert!`ed at emission time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KRegPair {
+    /// k2 (even, low) and k3 (high).
+    K2K3,
+    /// k4 (even, low) and k5 (high).
+    K4K5,
+    /// k6 (even, low) and k7 (high).
+    K6K7,
+}
+
+impl KRegPair {
+    /// The even (low) k-register of the pair, as a real `Reg` of
+    /// `RegClass::Vector`.
+    pub fn low(self) -> crate::machinst::Reg {
+        use crate::isa::x64::inst::regs;
+        match self {
+            KRegPair::K2K3 => regs::k2(),
+            KRegPair::K4K5 => regs::k4(),
+            KRegPair::K6K7 => regs::k6(),
+        }
+    }
+
+    /// The odd (high) k-register of the pair, as a real `Reg` of
+    /// `RegClass::Vector`.
+    pub fn high(self) -> crate::machinst::Reg {
+        use crate::isa::x64::inst::regs;
+        match self {
+            KRegPair::K2K3 => regs::k3(),
+            KRegPair::K4K5 => regs::k5(),
+            KRegPair::K6K7 => regs::k7(),
+        }
+    }
+
+    /// Hardware encoding of the even (low) k-register; structurally even by
+    /// construction.
+    pub fn low_enc(self) -> u8 {
+        match self {
+            KRegPair::K2K3 => 2,
+            KRegPair::K4K5 => 4,
+            KRegPair::K6K7 => 6,
+        }
+    }
+
+    /// Human-readable name of the pair for pretty-printing.
+    pub fn name(self) -> &'static str {
+        match self {
+            KRegPair::K2K3 => "%k2/%k3",
+            KRegPair::K4K5 => "%k4/%k5",
+            KRegPair::K6K7 => "%k6/%k7",
+        }
+    }
+}
+
 impl Vp2IntersectOp {
     /// Returns the opcode for VP2INTERSECT (always 0x68).
     pub fn opcode(&self) -> u8 {
