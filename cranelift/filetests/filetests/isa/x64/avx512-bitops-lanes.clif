@@ -485,3 +485,339 @@ block0(v0: f64x8, v1: f64):
 ;   popq %rbp
 ;   retq
 
+
+;; =============================================================================
+;; Lane-mask strictness regressions (all_lanes_ones_or_zeros)
+;; =============================================================================
+;; The whole-lane VPBLENDMD/Q and masked-fusion lowerings sample only each
+;; lane's sign bit (VPMOVD2M/Q), so they may fire only when the condition is
+;; provably a LANE mask at the bitselect type's granularity. Byte-granular
+;; masks (0x00/0xFF bytes, mixed within a lane) and lane-count-changing
+;; bitcasts of comparisons must take the bitwise VPTERNLOG path.
+
+;; vconst condition whose LANES are uniformly all-ones/all-zeros: the
+;; whole-lane blend is still legal and must be used.
+function %bitselect_i32x16_vconst_lanemask(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = vconst.i32x16 [0xffffffff 0 0xffffffff 0 0xffffffff 0 0xffffffff 0 0xffffffff 0 0xffffffff 0 0xffffffff 0 0xffffffff 0]
+    v3 = bitselect v2, v0, v1
+    return v3
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vmovdqu32 (%rip), %zmm5
+;   vpmovd2m %zmm5, %k4
+;   vpblendmd %zmm0, %zmm1, %zmm0 {%k4}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vmovdqu32 0x12(%rip), %zmm5
+;   vpmovd2m %zmm5, %k4
+;   vpblendmd %zmm0, %zmm1, %zmm0 {%k4}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;   addb %bh, %bh
+
+;; vconst condition whose BYTES are all 0x00/0xFF but whose 32-bit lanes are
+;; NOT uniform (0x00ff00ff): must NOT take the sign-bit-sampling blend; must
+;; lower to the bitwise VPTERNLOGD.
+function %bitselect_i32x16_vconst_bytemask(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = vconst.i32x16 [0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff]
+    v3 = bitselect v2, v0, v1
+    return v3
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vmovdqu32 %zmm0, %zmm5
+;   vmovdqu32 (%rip), %zmm0
+;   vmovdqu32 %zmm5, %zmm6
+;   vpternlogd $0xca, %zmm1, %zmm6, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vmovdqu32 %zmm0, %zmm5
+;   vmovdqu32 0x1c(%rip), %zmm0
+;   vmovdqu32 %zmm5, %zmm6
+;   vpternlogd $0xca, %zmm1, %zmm6, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;   addb %al, (%rax)
+;   addb %al, (%rax)
+;   addb %al, (%rax)
+;   addb %al, (%rax)
+;   addb %al, (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+
+;; 64-bit lanes of 0x00000000ffffffff: uniform at 32-bit granularity but not
+;; at the bitselect type's 64-bit granularity -> bitwise VPTERNLOGQ.
+function %bitselect_i64x8_vconst_bytemask(i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8):
+    v2 = vconst.i64x8 [0x00000000ffffffff 0x00000000ffffffff 0x00000000ffffffff 0x00000000ffffffff 0x00000000ffffffff 0x00000000ffffffff 0x00000000ffffffff 0x00000000ffffffff]
+    v3 = bitselect v2, v0, v1
+    return v3
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vmovdqu32 %zmm0, %zmm5
+;   vmovdqu64 (%rip), %zmm0
+;   vmovdqu32 %zmm5, %zmm6
+;   vpternlogq $0xca, %zmm1, %zmm6, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vmovdqu32 %zmm0, %zmm5
+;   vmovdqu64 0x1c(%rip), %zmm0
+;   vmovdqu32 %zmm5, %zmm6
+;   vpternlogq $0xca, %zmm1, %zmm6, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;   addb %al, (%rax)
+;   addb %al, (%rax)
+;   addb %al, (%rax)
+;   addb %al, (%rax)
+;   addb %al, (%rax)
+
+;; bitcast.i64x8 of an fcmp on f32x16: the comparison's lanes are 32-bit,
+;; the bitselect's are 64-bit, so this is a byte mask but not a 64-bit lane
+;; mask -> bitwise VPTERNLOGQ, never VPBLENDMQ.
+function %bitselect_i64x8_bitcast_fcmp(f32x16, f32x16, i64x8, i64x8) -> i64x8 {
+block0(v0: f32x16, v1: f32x16, v2: i64x8, v3: i64x8):
+    v4 = fcmp eq v0, v1
+    v5 = bitcast.i64x8 little v4
+    v6 = bitselect v5, v2, v3
+    return v6
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vcmpps $0x0, %zmm1, %zmm0, %k6
+;   vpmovm2d %k6, %zmm0
+;   vpternlogq $0xca, %zmm3, %zmm2, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vcmpeqps %zmm1, %zmm0, %k6
+;   vpmovm2d %k6, %zmm0
+;   vpternlogq $0xca, %zmm3, %zmm2, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+;; Positive fusion lock: an icmp-produced mask still fuses
+;; bitselect(mask, iadd(x, y), passthru) into a single merge-masked VPADDD.
+function %fusion_iadd_i32x16_icmp_mask(i32x16, i32x16, i32x16, i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16, v2: i32x16, v3: i32x16, v4: i32x16):
+    v5 = icmp eq v0, v1
+    v6 = iadd v2, v3
+    v7 = bitselect v5, v6, v4
+    return v7
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vpcmpd $0x0, %zmm1, %zmm0, %k2
+;   vpmovm2d %k2, %zmm0
+;   vpmovd2m %zmm0, %k2
+;   vmovdqu32 %zmm4, %zmm0
+;   vpaddd %zmm3, %zmm2, %zmm0 {%k2}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vpcmpeqd %zmm1, %zmm0, %k2
+;   vpmovm2d %k2, %zmm0
+;   vpmovd2m %zmm0, %k2
+;   vmovdqu32 %zmm4, %zmm0
+;   vpaddd %zmm3, %zmm2, %zmm0 {%k2}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+;; Negative fusion lock: a byte-granular vconst mask must NOT fuse; expect a
+;; plain VPADDD followed by the bitwise VPTERNLOGD select.
+function %fusion_iadd_i32x16_bytemask(i32x16, i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16, v2: i32x16):
+    v3 = vconst.i32x16 [0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff 0x00ff00ff]
+    v4 = iadd v0, v1
+    v5 = bitselect v3, v4, v2
+    return v5
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vmovdqu32 %zmm0, %zmm3
+;   vmovdqu32 (%rip), %zmm0
+;   vpaddd %zmm1, %zmm3, %zmm6
+;   vpternlogd $0xca, %zmm2, %zmm6, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vmovdqu32 %zmm0, %zmm3
+;   vmovdqu32 0x1c(%rip), %zmm0
+;   vpaddd %zmm1, %zmm3, %zmm6
+;   vpternlogd $0xca, %zmm2, %zmm6, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;   addb %al, (%rax)
+;   addb %al, (%rax)
+;   addb %al, (%rax)
+;   addb %al, (%rax)
+;   addb %al, (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+;   incl (%rax)
+
+;; Positive lock for the same-lane-count bitcast arm: the canonical float
+;; mask pattern bitcast.f32x16(fcmp on f32x16) keeps the masked VADDPS
+;; fusion (32-bit lanes on both sides of the bitcast).
+function %fusion_fadd_f32x16_bitcast_fcmp(f32x16, f32x16, f32x16, f32x16, f32x16) -> f32x16 {
+block0(v0: f32x16, v1: f32x16, v2: f32x16, v3: f32x16, v4: f32x16):
+    v5 = fcmp gt v0, v1
+    v6 = bitcast.f32x16 little v5
+    v7 = fadd v2, v3
+    v8 = bitselect v6, v7, v4
+    return v8
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vcmpps $0x1, %zmm0, %zmm1, %k2
+;   vpmovm2d %k2, %zmm0
+;   vpmovd2m %zmm0, %k2
+;   vmovdqu32 %zmm4, %zmm0
+;   vaddps %zmm3, %zmm2, %zmm0 {%k2}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vcmpltps %zmm0, %zmm1, %k2
+;   vpmovm2d %k2, %zmm0
+;   vpmovd2m %zmm0, %k2
+;   vmovdqu32 %zmm4, %zmm0
+;   vaddps %zmm3, %zmm2, %zmm0 {%k2}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+

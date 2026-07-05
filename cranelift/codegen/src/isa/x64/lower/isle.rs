@@ -830,6 +830,35 @@ impl Context for IsleContext<'_, '_, MInst, X64Backend> {
         None
     }
 
+    /// Strict, lane-granular version of `vconst_all_ones_or_all_zeros`: the
+    /// constant must be exactly as wide as `ty` and every lane-sized chunk
+    /// (at `ty`'s lane width) must be uniformly 0x00 or uniformly 0xFF
+    /// bytes. Used to prove that a `vconst` condition is a whole-LANE mask
+    /// before lowering a bitwise `bitselect` to sign-bit-sampling AVX-512
+    /// blends/merge-masked instructions (see `all_lanes_ones_or_zeros` in
+    /// isa/x64/lower/isle/avx512.isle).
+    #[inline]
+    fn vconst_lanes_all_ones_or_all_zeros(&mut self, ty: Type, constant: Constant) -> Option<bool> {
+        let lane_bytes = ty.lane_type().bytes() as usize;
+        let ty_bytes = ty.bytes() as usize;
+        if lane_bytes == 0 || ty_bytes == 0 {
+            return None;
+        }
+        let const_data = self.lower_ctx.get_constant_data(constant);
+        let data = const_data.as_slice();
+        if data.len() != ty_bytes || ty_bytes % lane_bytes != 0 {
+            return None;
+        }
+        if data
+            .chunks_exact(lane_bytes)
+            .all(|lane| lane.iter().all(|&b| b == 0x00) || lane.iter().all(|&b| b == 0xFF))
+        {
+            Some(true)
+        } else {
+            None
+        }
+    }
+
     #[inline]
     fn shuffle_0_31_mask(&mut self, mask: &VecMask) -> VCodeConstant {
         let mask = mask

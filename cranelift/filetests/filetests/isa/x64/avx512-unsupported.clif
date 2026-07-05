@@ -62,3 +62,22 @@ block0(v0: i64x8, v1: i64x8):
     v2 = urem v0, v1
     return v2
 }
+
+;; Integer extractlane/insertlane on 512-bit vectors bounce through
+;; PEXTRD/PEXTRQ/PINSRD/PINSRQ, which are SSE4.1 instructions. Neither
+;; target line in this file enables `has_sse41` (it is NOT implied by the
+;; AVX-512 flags), so these must fail with a clean `Unsupported` error on
+;; both targets -- previously the AVX-512 rules were missing the sse41 gate
+;; and this panicked at emission time. On plain `x86_64` they fail because
+;; 512-bit vectors are unsupported without the AVX-512 flags.
+function %extractlane_i32x16_no_sse41(i32x16) -> i32 {
+block0(v0: i32x16):
+    v1 = extractlane v0, 5
+    return v1
+}
+
+function %insertlane_i64x8_no_sse41(i64x8, i64) -> i64x8 {
+block0(v0: i64x8, v1: i64):
+    v2 = insertlane v0, v1, 3
+    return v2
+}
