@@ -4,7 +4,7 @@ use crate::address::{Address, AddressSize};
 use crate::frame::Frame;
 use crate::instruction::InstructionContext;
 use crate::state::{InterpreterFunctionRef, MemoryError, State};
-use crate::value::{DataValueExt, ValueConversionKind, ValueError, ValueResult};
+use crate::value::{DataValueExt, ValueConversionKind, ValueError, ValueResult, ValueTypeClass};
 use cranelift_codegen::data_value::DataValue;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
@@ -589,7 +589,18 @@ where
         Opcode::F32const => assign(imm()),
         Opcode::F64const => assign(imm()),
         Opcode::F128const => assign(imm()),
-        Opcode::Vconst => assign(imm()),
+        Opcode::Vconst => {
+            // The interpreter's `DataValue` cannot represent vectors wider
+            // than 128 bits; report a clean error for wider (e.g. 512-bit
+            // AVX-512) constants instead of panicking in `imm()`.
+            if ctrl_ty.bytes() > 16 {
+                return Err(StepError::ValueError(ValueError::InvalidType(
+                    ValueTypeClass::Vector,
+                    ctrl_ty,
+                )));
+            }
+            assign(imm())
+        }
         Opcode::Nop => ControlFlow::Continue,
         Opcode::Select | Opcode::SelectSpectreGuard => choose(arg(0).into_bool()?, arg(1), arg(2)),
         Opcode::Bitselect => assign(bitselect(arg(0), arg(1), arg(2))?),
@@ -1036,15 +1047,25 @@ where
             assign(DataValueExt::vector(new, types::I8X16)?)
         }
         Opcode::Swizzle => {
-            let x = DataValueExt::into_array(&arg(0))?;
-            let s = DataValueExt::into_array(&arg(1))?;
-            let mut new = [0u8; 16];
-            for i in 0..new.len() {
-                if (s[i] as usize) < new.len() {
-                    new[i] = x[s[i] as usize];
-                } // else leave as 0
-            }
-            assign(DataValueExt::vector(new, types::I8X16)?)
+            // Lane-generic swizzle: result lane `i` is lane `s[i]` of `x`
+            // when the unsigned index is in range, and 0 otherwise. The
+            // controlling type covers all of `swizzle`'s typeset (e.g.
+            // i8x16, i16x8, i8x8), not just i8x16.
+            let x = extractlanes(&arg(0), ctrl_ty)?;
+            let s = extractlanes(&arg(1), ctrl_ty)?;
+            let lane_ty = ctrl_ty.lane_type();
+            let new = s
+                .into_iter()
+                .map(|idx| {
+                    let idx = idx.into_int_unsigned()?;
+                    if idx < x.len() as u128 {
+                        Ok(x[idx as usize].clone())
+                    } else {
+                        DataValueExt::int(0, lane_ty)
+                    }
+                })
+                .collect::<ValueResult<SimdVec<DataValue>>>()?;
+            assign(vectorizelanes(&new, ctrl_ty)?)
         }
         Opcode::Splat => assign(splat(ctrl_ty, arg(0))?),
         Opcode::Insertlane => {

@@ -1,0 +1,34 @@
+test interpret
+
+;; `swizzle` on the wider-lane vector types admitted by its widened type set
+;; (ints 8..64 x lanes 8..16): each lane of the index vector selects a whole
+;; lane of `x` (interpreted as an unsigned index), and indices at or above
+;; the lane count produce a zero lane.
+;;
+;; No backend currently lowers these 64/128-bit wide-lane forms, so they are
+;; interpreter-only here. The i8x16 form (which backends do lower) is
+;; cross-checked against host execution in simd-swizzle.clif, and the
+;; AVX-512 512-bit forms (i32x16/i64x8) have `test run` coverage in
+;; runtests/x64/.
+
+function %swizzle_i16x8(i16x8, i16x8) -> i16x8 {
+block0(v0: i16x8, v1: i16x8):
+    v2 = swizzle v0, v1
+    return v2
+}
+; In-range indices select whole 16-bit lanes.
+; run: %swizzle_i16x8([100 101 102 103 104 105 106 107], [7 6 5 4 3 2 1 0]) == [107 106 105 104 103 102 101 100]
+; run: %swizzle_i16x8([100 101 102 103 104 105 106 107], [0 0 3 3 7 7 1 1]) == [100 100 103 103 107 107 101 101]
+; Out-of-range indices (>= 8 lanes) produce zero lanes; -1 is 0xffff
+; unsigned and is therefore also out of range.
+; run: %swizzle_i16x8([100 101 102 103 104 105 106 107], [0 8 15 16 -1 1 2 3]) == [100 0 0 0 0 101 102 103]
+
+function %swizzle_i8x8(i8x8, i8x8) -> i8x8 {
+block0(v0: i8x8, v1: i8x8):
+    v2 = swizzle v0, v1
+    return v2
+}
+; run: %swizzle_i8x8([1 2 3 4 5 6 7 8], [7 6 5 4 3 2 1 0]) == [8 7 6 5 4 3 2 1]
+; Only 8 lanes exist, so index 8 and up (including -1 = 255 unsigned) is
+; out of range even though an i8 index could address 16 lanes.
+; run: %swizzle_i8x8([1 2 3 4 5 6 7 8], [0 7 8 100 -1 1 2 3]) == [1 8 0 0 0 2 3 4]

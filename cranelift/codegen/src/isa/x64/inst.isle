@@ -804,14 +804,12 @@
 (type GatherOp extern
       (enum Vpgatherdd
             Vpgatherdq
-            Vpgatherqd
             Vpgatherqq))
 
 ;; AVX-512 Scatter operations (manual MInst - requires VSIB addressing)
 (type ScatterOp extern
       (enum Vpscatterdd
             Vpscatterdq
-            Vpscatterqd
             Vpscatterqq))
 
 (type OptionMaskReg (primitive OptionMaskReg))

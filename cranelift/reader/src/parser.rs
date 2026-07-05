@@ -802,6 +802,45 @@ impl<'a> Parser<'a> {
         }
     }
 
+    // Match and consume a gather/scatter scale factor together with its
+    // optional offset32.
+    //
+    // The printer emits `*{scale}{offset}`, e.g. `*4`, `*4+8` or `*4-8`; the
+    // leading `*` is optional when parsing. A negative offset needs special
+    // handling here: the lexer folds a `-` that directly follows a digit into
+    // the preceding integer token (`4-8` lexes as the single token `4-8`), so
+    // the combined token is split at the `-` into scale and offset parts.
+    fn match_uimm8_scale_and_offset32(
+        &mut self,
+        err_msg: &str,
+    ) -> ParseResult<(u8, Offset32)> {
+        if let Some(Token::Multiply) = self.token() {
+            self.consume();
+        }
+        if let Some(Token::Integer(text)) = self.token() {
+            self.consume();
+            let (scale_text, offset_text) = match text.find('-') {
+                Some(idx) if idx > 0 => (&text[..idx], Some(&text[idx..])),
+                _ => (text, None),
+            };
+            let scale = if let Some(num) = scale_text.strip_prefix("0x") {
+                u8::from_str_radix(num, 16)
+                    .map_err(|_| self.error("unable to parse u8 as a hexadecimal immediate"))?
+            } else {
+                scale_text
+                    .parse()
+                    .map_err(|_| self.error("expected u8 decimal immediate"))?
+            };
+            let offset = match offset_text {
+                Some(text) => text.parse().map_err(|e| self.error(e))?,
+                None => self.optional_offset32()?,
+            };
+            Ok((scale, offset))
+        } else {
+            err!(self.loc, err_msg)
+        }
+    }
+
     // Match and consume an i8 immediate.
     fn match_imm8(&mut self, err_msg: &str) -> ParseResult<i8> {
         match_imm!(i8, u8, self, err_msg)
@@ -3426,8 +3465,8 @@ impl<'a> Parser<'a> {
                 self.match_token(Token::Comma, "expected ',' between operands")?;
                 let indices = self.match_value("expected indices vector")?;
                 self.match_token(Token::Comma, "expected ',' between operands")?;
-                let scale = self.match_uimm8("expected scale factor (1, 2, 4, or 8)")?;
-                let offset = self.optional_offset32()?;
+                let (scale, offset) =
+                    self.match_uimm8_scale_and_offset32("expected scale factor (1, 2, 4, or 8)")?;
                 InstructionData::SimdGather {
                     opcode,
                     flags,
@@ -3450,8 +3489,8 @@ impl<'a> Parser<'a> {
                 self.match_token(Token::Comma, "expected ',' between operands")?;
                 let indices = self.match_value("expected indices vector")?;
                 self.match_token(Token::Comma, "expected ',' between operands")?;
-                let scale = self.match_uimm8("expected scale factor (1, 2, 4, or 8)")?;
-                let offset = self.optional_offset32()?;
+                let (scale, offset) =
+                    self.match_uimm8_scale_and_offset32("expected scale factor (1, 2, 4, or 8)")?;
                 InstructionData::SimdScatter {
                     opcode,
                     flags,
@@ -4189,5 +4228,36 @@ mod tests {
         assert!(func.layout.is_cold(Block::from_u32(0)));
         assert!(func.layout.is_cold(Block::from_u32(1)));
         assert!(!func.layout.is_cold(Block::from_u32(2)));
+    }
+
+    #[test]
+    fn simd_gather_scatter_roundtrip() {
+        // The AVX-512 gather/scatter scale+offset prints as `*{scale}{offset}`
+        // (e.g. `*4-8`). Check that print -> parse -> print is a fixed point,
+        // including negative offsets, which the lexer folds into the scale's
+        // integer token (`4-8` lexes as a single token).
+        let code = "function %gs(i64, i32x16, i32x16, i32x16) -> i32x16 {
+        block0(v0: i64, v1: i32x16, v2: i32x16, v3: i32x16):
+            v4 = x86_simd_gather.i32x16 notrap aligned v0, v1, *4+8
+            v5 = x86_simd_gather.i32x16 notrap aligned v0, v1, *4-8
+            v6 = x86_simd_gather.i32x16 notrap aligned v0, v1, *1-2048
+            v7 = x86_simd_gather.i32x16 notrap aligned v0, v1, *8
+            x86_simd_scatter notrap aligned v1, v2, v0, v3, *4+8
+            x86_simd_scatter notrap aligned v1, v2, v0, v3, *4-8
+            x86_simd_scatter notrap aligned v1, v2, v0, v3, *1-2048
+            x86_simd_scatter notrap aligned v1, v2, v0, v3, *8
+            v8 = x86_simd_masked_load.i32x16 notrap aligned v1, v2, v0-8
+            return v4
+        }";
+        let func = Parser::new(code).parse_function().unwrap().0;
+        let printed = func.to_string();
+        // Spot-check the canonical printed syntax.
+        assert!(printed.contains("v0, v1, *4+8"), "{printed}");
+        assert!(printed.contains("v0, v1, *4-8"), "{printed}");
+        assert!(printed.contains("v0, v3, *1-2048"), "{printed}");
+        assert!(printed.contains("v1, v2, v0-8"), "{printed}");
+        // The printed form must reparse to the identical printed form.
+        let reparsed = Parser::new(&printed).parse_function().unwrap().0;
+        assert_eq!(printed, reparsed.to_string());
     }
 }

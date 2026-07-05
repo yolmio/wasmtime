@@ -1,0 +1,52 @@
+test cat
+
+; Parse/print round-tripping for the AVX-512 memory instructions. The printer
+; emits the scale as `*{scale}{offset}` (e.g. `*4+8`, `*4-8`); the parser
+; accepts that form (the `*` is optional) including the case where the lexer
+; folds a negative offset into the scale token (`4-8` lexes as one token).
+
+function %gather(i64, i32x16) -> i32x16 {
+block0(v0: i64, v1: i32x16):
+    v2 = x86_simd_gather.i32x16 notrap aligned v0, v1, *4+8
+    ; check: v2 = x86_simd_gather.i32x16 notrap aligned v0, v1, *4+8
+    v3 = x86_simd_gather.i32x16 notrap aligned v0, v1, *4-8
+    ; check: v3 = x86_simd_gather.i32x16 notrap aligned v0, v1, *4-8
+    v4 = x86_simd_gather.i32x16 notrap aligned v0, v1, *1-2048
+    ; check: v4 = x86_simd_gather.i32x16 notrap aligned v0, v1, *1-2048
+    v5 = x86_simd_gather.i32x16 notrap aligned v0, v1, *8
+    ; check: v5 = x86_simd_gather.i32x16 notrap aligned v0, v1, *8
+    v6 = x86_simd_gather.i32x16 notrap aligned v0, v1, 2+16
+    ; check: v6 = x86_simd_gather.i32x16 notrap aligned v0, v1, *2+16
+    return v2
+}
+
+function %gather_dq(i64, i32x8) -> i64x8 {
+block0(v0: i64, v1: i32x8):
+    v2 = x86_simd_gather.i64x8 notrap aligned v0, v1, *8-8
+    ; check: v2 = x86_simd_gather.i64x8 notrap aligned v0, v1, *8-8
+    return v2
+}
+
+function %scatter(i64, i32x16, i32x16, i32x16) {
+block0(v0: i64, v1: i32x16, v2: i32x16, v3: i32x16):
+    x86_simd_scatter notrap aligned v1, v2, v0, v3, *4+8
+    ; check: x86_simd_scatter notrap aligned v1, v2, v0, v3, *4+8
+    x86_simd_scatter notrap aligned v1, v2, v0, v3, *4-8
+    ; check: x86_simd_scatter notrap aligned v1, v2, v0, v3, *4-8
+    x86_simd_scatter notrap aligned v1, v2, v0, v3, 1-2048
+    ; check: x86_simd_scatter notrap aligned v1, v2, v0, v3, *1-2048
+    x86_simd_scatter notrap aligned v1, v2, v0, v3, *8
+    ; check: x86_simd_scatter notrap aligned v1, v2, v0, v3, *8
+    return
+}
+
+function %masked(i64, i32x16, i32x16) -> i32x16 {
+block0(v0: i64, v1: i32x16, v2: i32x16):
+    v3 = x86_simd_masked_load.i32x16 notrap aligned v1, v2, v0+16
+    ; check: v3 = x86_simd_masked_load notrap aligned v1, v2, v0+16
+    v4 = x86_simd_masked_load.i32x16 notrap aligned v1, v2, v0-16
+    ; check: v4 = x86_simd_masked_load notrap aligned v1, v2, v0-16
+    x86_simd_masked_store notrap aligned v1, v2, v0-8
+    ; check: x86_simd_masked_store notrap aligned v1, v2, v0-8
+    return v3
+}

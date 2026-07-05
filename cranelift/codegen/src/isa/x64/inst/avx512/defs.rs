@@ -48,9 +48,6 @@ pub enum GatherOp {
     /// VPGATHERDQ - Gather 64-bit elements using 32-bit indices
     /// zmm1 {k1}, [base + ymm_index*scale]
     Vpgatherdq,
-    /// VPGATHERQD - Gather 32-bit elements using 64-bit indices
-    /// ymm1 {k1}, [base + zmm_index*scale]
-    Vpgatherqd,
     /// VPGATHERQQ - Gather 64-bit elements using 64-bit indices
     /// zmm1 {k1}, [base + zmm_index*scale]
     Vpgatherqq,
@@ -62,25 +59,25 @@ impl GatherOp {
         match self {
             // Opcode depends on index size, NOT element size:
             // - 0x90 for 32-bit indices (D): VPGATHERDD, VPGATHERDQ
-            // - 0x91 for 64-bit indices (Q): VPGATHERQD, VPGATHERQQ
+            // - 0x91 for 64-bit indices (Q): VPGATHERQQ
             // The W bit (element size) is a separate encoding field.
             GatherOp::Vpgatherdd | GatherOp::Vpgatherdq => 0x90,
-            GatherOp::Vpgatherqd | GatherOp::Vpgatherqq => 0x91,
+            GatherOp::Vpgatherqq => 0x91,
         }
     }
 
     /// Returns the EVEX.W bit for this operation.
     pub fn evex_w(&self) -> bool {
         match self {
-            GatherOp::Vpgatherdd | GatherOp::Vpgatherqd => false, // W=0 for 32-bit elements
-            GatherOp::Vpgatherdq | GatherOp::Vpgatherqq => true,  // W=1 for 64-bit elements
+            GatherOp::Vpgatherdd => false, // W=0 for 32-bit elements
+            GatherOp::Vpgatherdq | GatherOp::Vpgatherqq => true, // W=1 for 64-bit elements
         }
     }
 
     /// Returns the element size in bytes.
     pub fn element_size(&self) -> u8 {
         match self {
-            GatherOp::Vpgatherdd | GatherOp::Vpgatherqd => 4,
+            GatherOp::Vpgatherdd => 4,
             GatherOp::Vpgatherdq | GatherOp::Vpgatherqq => 8,
         }
     }
@@ -90,7 +87,6 @@ impl GatherOp {
         match self {
             GatherOp::Vpgatherdd => "vpgatherdd",
             GatherOp::Vpgatherdq => "vpgatherdq",
-            GatherOp::Vpgatherqd => "vpgatherqd",
             GatherOp::Vpgatherqq => "vpgatherqq",
         }
     }
@@ -110,9 +106,6 @@ pub enum ScatterOp {
     /// VPSCATTERDQ - Scatter 64-bit elements using 32-bit indices
     /// [base + ymm_index*scale] {k1}, zmm1
     Vpscatterdq,
-    /// VPSCATTERQD - Scatter 32-bit elements using 64-bit indices
-    /// [base + zmm_index*scale] {k1}, ymm1
-    Vpscatterqd,
     /// VPSCATTERQQ - Scatter 64-bit elements using 64-bit indices
     /// [base + zmm_index*scale] {k1}, zmm1
     Vpscatterqq,
@@ -124,25 +117,25 @@ impl ScatterOp {
         match self {
             // Opcode depends on index size, NOT element size:
             // - 0xA0 for 32-bit indices (D): VPSCATTERDD, VPSCATTERDQ
-            // - 0xA1 for 64-bit indices (Q): VPSCATTERQD, VPSCATTERQQ
+            // - 0xA1 for 64-bit indices (Q): VPSCATTERQQ
             // The W bit (element size) is a separate encoding field.
             ScatterOp::Vpscatterdd | ScatterOp::Vpscatterdq => 0xA0,
-            ScatterOp::Vpscatterqd | ScatterOp::Vpscatterqq => 0xA1,
+            ScatterOp::Vpscatterqq => 0xA1,
         }
     }
 
     /// Returns the EVEX.W bit for this operation.
     pub fn evex_w(&self) -> bool {
         match self {
-            ScatterOp::Vpscatterdd | ScatterOp::Vpscatterqd => false, // W=0 for 32-bit elements
-            ScatterOp::Vpscatterdq | ScatterOp::Vpscatterqq => true,  // W=1 for 64-bit elements
+            ScatterOp::Vpscatterdd => false, // W=0 for 32-bit elements
+            ScatterOp::Vpscatterdq | ScatterOp::Vpscatterqq => true, // W=1 for 64-bit elements
         }
     }
 
     /// Returns the element size in bytes.
     pub fn element_size(&self) -> u8 {
         match self {
-            ScatterOp::Vpscatterdd | ScatterOp::Vpscatterqd => 4,
+            ScatterOp::Vpscatterdd => 4,
             ScatterOp::Vpscatterdq | ScatterOp::Vpscatterqq => 8,
         }
     }
@@ -152,7 +145,6 @@ impl ScatterOp {
         match self {
             ScatterOp::Vpscatterdd => "vpscatterdd",
             ScatterOp::Vpscatterdq => "vpscatterdq",
-            ScatterOp::Vpscatterqd => "vpscatterqd",
             ScatterOp::Vpscatterqq => "vpscatterqq",
         }
     }
@@ -191,8 +183,10 @@ pub enum Vp2IntersectOp {
 ///
 /// Type-safety invariant: the only inhabitants are the three even/odd
 /// adjacent pairs among the allocatable mask registers k2-k7 (k0 is the
-/// hardwired "no mask" register and k1 is reserved as the pinned
-/// gather/scatter mask; neither is in the register allocator's `MachineEnv`).
+/// hardwired "no mask" register and k1 is only ever used as the
+/// value-independent source of the `kxnorw k1, k1, kN` all-ones mask
+/// idiom, so gather/scatter masks allocate from k2-k7; neither k0 nor k1
+/// is in the register allocator's `MachineEnv`).
 /// An odd-based or non-adjacent pair is unrepresentable, so evenness never
 /// needs to be `debug_assert!`ed at emission time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

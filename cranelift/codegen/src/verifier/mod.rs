@@ -739,6 +739,81 @@ impl<'a> Verifier<'a> {
                 self.verify_try_call_handler_index(inst, block, imm.into(), errors)?;
             }
 
+            // AVX-512 gather: value operands are `[base, indices]`.
+            SimdGather { ref args, imm, .. } => {
+                let args = args.as_slice(&self.func.dfg.value_lists);
+                let [base, indices] = *args else {
+                    return errors.fatal((
+                        inst,
+                        self.context(inst),
+                        format!("expected 2 value operands, got {}", args.len()),
+                    ));
+                };
+                let data_ty = match self.func.dfg.inst_results(inst).first() {
+                    Some(&result) => self.func.dfg.value_type(result),
+                    None => {
+                        return errors.fatal((
+                            inst,
+                            self.context(inst),
+                            "gather must have a result",
+                        ));
+                    }
+                };
+                self.verify_is_address(inst, base, errors)?;
+                self.verify_simd_mem_index_type(inst, indices, data_ty, errors)?;
+                self.verify_simd_mem_scale(inst, imm, errors)?;
+            }
+
+            // AVX-512 scatter: value operands are `[mask, value, base, indices]`.
+            SimdScatter { ref args, imm, .. } => {
+                let args = args.as_slice(&self.func.dfg.value_lists);
+                let [mask, value, base, indices] = *args else {
+                    return errors.fatal((
+                        inst,
+                        self.context(inst),
+                        format!("expected 4 value operands, got {}", args.len()),
+                    ));
+                };
+                let data_ty = self.func.dfg.value_type(value);
+                self.verify_is_address(inst, base, errors)?;
+                self.verify_simd_mem_mask_type(inst, mask, data_ty, errors)?;
+                self.verify_simd_mem_index_type(inst, indices, data_ty, errors)?;
+                self.verify_simd_mem_scale(inst, imm, errors)?;
+            }
+
+            // AVX-512 masked load/store: value operands are
+            // `[mask, passthru-or-value, base]`.
+            SimdMaskedMem { ref args, .. } => {
+                let args = args.as_slice(&self.func.dfg.value_lists);
+                let [mask, value, base] = *args else {
+                    return errors.fatal((
+                        inst,
+                        self.context(inst),
+                        format!("expected 3 value operands, got {}", args.len()),
+                    ));
+                };
+                let data_ty = self.func.dfg.value_type(value);
+                self.verify_is_address(inst, base, errors)?;
+                self.verify_simd_mem_mask_type(inst, mask, data_ty, errors)?;
+                // For the masked load the `passthru` operand supplies the
+                // lanes whose mask bit is clear, so it must have exactly the
+                // result's type. (`passthru` is the controlling type-var
+                // operand, so this is normally enforced by type inference;
+                // re-check it here to catch hand-built IR.)
+                if let Some(&result) = self.func.dfg.inst_results(inst).first() {
+                    let result_ty = self.func.dfg.value_type(result);
+                    if result_ty != data_ty {
+                        return errors.fatal((
+                            inst,
+                            self.context(inst),
+                            format!(
+                                "passthru type {data_ty} must match the result type {result_ty}"
+                            ),
+                        ));
+                    }
+                }
+            }
+
             // Exhaustive list so we can't forget to add new formats
             AtomicCas { .. }
             | AtomicRmw { .. }
@@ -764,10 +839,7 @@ impl<'a> Verifier<'a> {
             | Store { .. }
             | Trap { .. }
             | CondTrap { .. }
-            | NullAry { .. }
-            | SimdGather { .. }
-            | SimdMaskedMem { .. }
-            | SimdScatter { .. } => {}
+            | NullAry { .. } => {}
         }
 
         Ok(())
@@ -1222,6 +1294,88 @@ impl<'a> Verifier<'a> {
             } else {
                 Ok(())
             }
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Verify the mask operand of an AVX-512 masked memory instruction
+    /// (`x86_simd_scatter`, `x86_simd_masked_load`, `x86_simd_masked_store`).
+    ///
+    /// The x64 lowering converts the mask to a k-register with
+    /// VPMOVD2M/VPMOVQ2M at the *data* type's lane granularity (the mask
+    /// lane's sign bit selects the lane), so the mask must be an integer
+    /// vector with the same lane count and lane width as the data vector.
+    fn verify_simd_mem_mask_type(
+        &self,
+        inst: Inst,
+        mask: Value,
+        data_ty: Type,
+        errors: &mut VerifierErrors,
+    ) -> VerifierStepResult {
+        let mask_ty = self.func.dfg.value_type(mask);
+        if !mask_ty.is_vector()
+            || !mask_ty.lane_type().is_int()
+            || mask_ty.lane_count() != data_ty.lane_count()
+            || mask_ty.lane_bits() != data_ty.lane_bits()
+        {
+            errors.fatal((
+                inst,
+                self.context(inst),
+                format!(
+                    "mask type {mask_ty} must be an integer vector with the same \
+                     lane count and lane width as the data type {data_ty}"
+                ),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Verify the index vector of an AVX-512 gather/scatter: it must be an
+    /// integer vector providing exactly one index per data lane (the lane
+    /// *width* may differ, e.g. i32x8 indices with i64x8 data for
+    /// VPGATHERDQ).
+    fn verify_simd_mem_index_type(
+        &self,
+        inst: Inst,
+        indices: Value,
+        data_ty: Type,
+        errors: &mut VerifierErrors,
+    ) -> VerifierStepResult {
+        let index_ty = self.func.dfg.value_type(indices);
+        if !index_ty.is_vector()
+            || !index_ty.lane_type().is_int()
+            || index_ty.lane_count() != data_ty.lane_count()
+        {
+            errors.fatal((
+                inst,
+                self.context(inst),
+                format!(
+                    "index type {index_ty} must be an integer vector with the same \
+                     lane count as the data type {data_ty}"
+                ),
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Verify the scale immediate of an AVX-512 gather/scatter. The x86
+    /// addressing mode only encodes scales of 1, 2, 4 or 8; anything else
+    /// would panic at emission time.
+    fn verify_simd_mem_scale(
+        &self,
+        inst: Inst,
+        scale: u8,
+        errors: &mut VerifierErrors,
+    ) -> VerifierStepResult {
+        if !matches!(scale, 1 | 2 | 4 | 8) {
+            errors.fatal((
+                inst,
+                self.context(inst),
+                format!("invalid scale {scale}; must be 1, 2, 4, or 8"),
+            ))
         } else {
             Ok(())
         }
