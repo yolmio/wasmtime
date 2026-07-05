@@ -944,6 +944,7 @@ impl ABIMachineSpec for S390xMachineDeps {
     fn compute_frame_layout(
         call_conv: isa::CallConv,
         flags: &settings::Flags,
+        _isa_flags: &Self::F,
         _sig: &Signature,
         regs: &[Writable<RealReg>],
         function_calls: FunctionCalls,
@@ -1036,6 +1037,7 @@ impl ABIMachineSpec for S390xMachineDeps {
             stackslots_size,
             outgoing_args_size,
             clobbered_callee_saves: regs,
+            fpr_save_bytes: 0,
             function_calls,
         }
     }

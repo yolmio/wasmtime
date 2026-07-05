@@ -772,7 +772,13 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             let r_reg = reg.to_reg();
             let ty = match r_reg.class() {
                 RegClass::Int => types::I64,
-                RegClass::Float => types::I8X16,
+                // `fpr_save_bytes` is 64 when the full ZMM state must be
+                // preserved (AVX-512), 16 otherwise; see
+                // `compute_frame_layout`.
+                RegClass::Float => match frame_layout.fpr_save_bytes {
+                    64 => types::I32X16,
+                    _ => types::I8X16,
+                },
                 // K-registers are 64-bit
                 RegClass::Vector => types::I64,
             };
@@ -817,7 +823,11 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             let rreg = reg.to_reg();
             let ty = match rreg.class() {
                 RegClass::Int => types::I64,
-                RegClass::Float => types::I8X16,
+                // Must match the save width chosen in `gen_clobber_save`.
+                RegClass::Float => match frame_layout.fpr_save_bytes {
+                    64 => types::I32X16,
+                    _ => types::I8X16,
+                },
                 // K-registers are 64-bit
                 RegClass::Vector => types::I64,
             };
@@ -996,6 +1006,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
     fn compute_frame_layout(
         call_conv: CallConv,
         flags: &settings::Flags,
+        isa_flags: &Self::F,
         _sig: &Signature,
         regs: &[Writable<RealReg>],
         function_calls: FunctionCalls,
@@ -1021,8 +1032,27 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                 .cloned()
                 .filter(|r| is_callee_save_fastcall(r.to_reg(), flags.enable_pinned_reg()))
                 .collect(),
-            // The `preserve_all` calling convention makes every reg a callee-save reg.
-            CallConv::PreserveAll => regs.iter().cloned().collect(),
+            // The `preserve_all` calling convention makes every reg a callee-save
+            // reg. However, the clobber set handed to us by regalloc includes the
+            // static call-clobber sets of any calls in the body (`SYSV_CLOBBERS`
+            // et al.), and those unconditionally list the AVX-512-only registers
+            // (xmm16-xmm31 and the k-mask registers k2-k7). Without AVX-512 those
+            // registers do not exist on the target: nothing can hold a live value
+            // in them, and we could not even emit their save/restore instructions
+            // (kmovq / EVEX moves), so filter them out. With AVX-512 they must be
+            // saved as usual.
+            CallConv::PreserveAll => regs
+                .iter()
+                .cloned()
+                .filter(|r| {
+                    isa_flags.has_avx512f()
+                        || match r.to_reg().class() {
+                            RegClass::Int => true,
+                            RegClass::Float => r.to_reg().hw_enc() < 16,
+                            RegClass::Vector => false,
+                        }
+                })
+                .collect(),
             CallConv::Probestack => todo!("probestack?"),
             CallConv::AppleAarch64 => unreachable!(),
         };
@@ -1030,8 +1060,14 @@ impl ABIMachineSpec for X64ABIMachineSpec {
         // registers will be unique (there are no dups).
         regs.sort_unstable();
 
+        // Width used to save each Float-class clobber: with AVX-512 the full
+        // 512-bit ZMM state must be preserved (a 128-bit save would silently
+        // drop the upper bits of a caller's live ZMM value); otherwise the
+        // 128-bit XMM state is all that exists.
+        let fpr_save_bytes = if isa_flags.has_avx512f() { 64 } else { 16 };
+
         // Compute clobber size.
-        let clobber_size = compute_clobber_size(&regs);
+        let clobber_size = compute_clobber_size(&regs, fpr_save_bytes);
 
         // Compute setup area size.
         let setup_area_size = 16; // RBP, return address
@@ -1047,6 +1083,7 @@ impl ABIMachineSpec for X64ABIMachineSpec {
             stackslots_size,
             outgoing_args_size,
             clobbered_callee_saves: regs,
+            fpr_save_bytes,
             function_calls,
         }
     }
@@ -1259,7 +1296,7 @@ fn is_callee_save_fastcall(r: RealReg, enable_pinned_reg: bool) -> bool {
     }
 }
 
-fn compute_clobber_size(clobbers: &[Writable<RealReg>]) -> u32 {
+fn compute_clobber_size(clobbers: &[Writable<RealReg>], fpr_save_bytes: u32) -> u32 {
     let mut clobbered_size = 0;
     for reg in clobbers {
         match reg.to_reg().class() {
@@ -1267,8 +1304,11 @@ fn compute_clobber_size(clobbers: &[Writable<RealReg>]) -> u32 {
                 clobbered_size += 8;
             }
             RegClass::Float => {
-                clobbered_size = align_to(clobbered_size, 16);
-                clobbered_size += 16;
+                // This must mirror the offset computation in
+                // `gen_clobber_save`/`gen_clobber_restore`, which align each
+                // save to the width of its storage type.
+                clobbered_size = align_to(clobbered_size, fpr_save_bytes);
+                clobbered_size += fpr_save_bytes;
             }
             // AVX-512 K-registers are 64-bit
             RegClass::Vector => {

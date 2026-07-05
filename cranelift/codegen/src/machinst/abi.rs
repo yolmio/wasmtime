@@ -488,6 +488,7 @@ pub trait ABIMachineSpec {
     fn compute_frame_layout(
         call_conv: isa::CallConv,
         flags: &settings::Flags,
+        isa_flags: &Self::F,
         sig: &Signature,
         regs: &[Writable<RealReg>],
         function_calls: FunctionCalls,
@@ -1103,6 +1104,16 @@ pub struct FrameLayout {
     /// according to the ABI.  These registers will be saved and
     /// restored by gen_clobber_save and gen_clobber_restore.
     pub clobbered_callee_saves: Vec<Writable<RealReg>>,
+
+    /// Number of bytes used in the clobber area for each saved
+    /// float/vector-class register in `clobbered_callee_saves`.  This is
+    /// computed by `compute_frame_layout` (which has access to the ISA
+    /// flags) so that `gen_clobber_save`/`gen_clobber_restore` (which do
+    /// not) can pick a save width consistent with `clobber_size`.  On x64
+    /// this is 64 when AVX-512 is enabled (full ZMM state must be
+    /// preserved) and 16 otherwise.  Backends whose clobber save/restore
+    /// code does not consult this field set it to 0.
+    pub fpr_save_bytes: u32,
 
     /// The function's call pattern classification.
     pub function_calls: FunctionCalls,
@@ -2229,6 +2240,7 @@ impl<M: ABIMachineSpec> Callee<M> {
         self.frame_layout = Some(M::compute_frame_layout(
             self.call_conv,
             &self.flags,
+            &self.isa_flags,
             self.signature(),
             &clobbered,
             function_calls,

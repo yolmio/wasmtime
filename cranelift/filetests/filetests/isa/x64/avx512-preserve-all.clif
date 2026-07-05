@@ -1,0 +1,344 @@
+test compile precise-output
+set enable_simd32=true
+target x86_64 has_avx512f has_avx512bw has_avx512dq has_avx512vl
+
+;; `preserve_all` under AVX-512: every register the body clobbers (including
+;; the clobber sets of any calls it makes) must be saved and restored, and
+;; the saves must cover the *full* architectural state:
+;;   - Float-class saves must be 512-bit (`vmovdqu32` of the whole ZMM
+;;     register, 64 bytes each), not 128-bit `movdqu` -- a 128-bit save would
+;;     silently drop the upper bits of a caller's live ZMM value;
+;;   - xmm16-xmm31 must be included;
+;;   - the k-mask registers k2-k7 must be saved with `kmovq`.
+;;
+;; Conversely, a `preserve_all` function that never touches AVX-512 state
+;; (no calls, no vector ops) must not save any of it: the save list is driven
+;; by the function's actual regalloc clobbers.
+
+;; A trampoline: calling a system_v callee clobbers (abstractly) all
+;; caller-saved registers, so the preserve_all prologue must save the full
+;; ZMM state of xmm0-31 plus k2-k7.
+function %preserve_all_trampoline(i64) preserve_all {
+    fn0 = %libcall(i64) system_v
+block0(v0: i64):
+    call fn0(v0)
+    return
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x8b0, %rsp
+;   movq %rax, (%rsp)
+;   movq %rcx, 8(%rsp)
+;   movq %rdx, 0x10(%rsp)
+;   movq %rsi, 0x18(%rsp)
+;   movq %rdi, 0x20(%rsp)
+;   movq %r8, 0x28(%rsp)
+;   movq %r9, 0x30(%rsp)
+;   movq %r10, 0x38(%rsp)
+;   movq %r11, 0x40(%rsp)
+;   vmovdqu32 %zmm0, 0x80(%rsp)
+;   vmovdqu32 %zmm1, 0xc0(%rsp)
+;   vmovdqu32 %zmm2, 0x100(%rsp)
+;   vmovdqu32 %zmm3, 0x140(%rsp)
+;   vmovdqu32 %zmm4, 0x180(%rsp)
+;   vmovdqu32 %zmm5, 0x1c0(%rsp)
+;   vmovdqu32 %zmm6, 0x200(%rsp)
+;   vmovdqu32 %zmm7, 0x240(%rsp)
+;   vmovdqu32 %zmm8, 0x280(%rsp)
+;   vmovdqu32 %zmm9, 0x2c0(%rsp)
+;   vmovdqu32 %zmm10, 0x300(%rsp)
+;   vmovdqu32 %zmm11, 0x340(%rsp)
+;   vmovdqu32 %zmm12, 0x380(%rsp)
+;   vmovdqu32 %zmm13, 0x3c0(%rsp)
+;   vmovdqu32 %zmm14, 0x400(%rsp)
+;   vmovdqu32 %zmm15, 0x440(%rsp)
+;   vmovdqu32 %zmm16, 0x480(%rsp)
+;   vmovdqu32 %zmm17, 0x4c0(%rsp)
+;   vmovdqu32 %zmm18, 0x500(%rsp)
+;   vmovdqu32 %zmm19, 0x540(%rsp)
+;   vmovdqu32 %zmm20, 0x580(%rsp)
+;   vmovdqu32 %zmm21, 0x5c0(%rsp)
+;   vmovdqu32 %zmm22, 0x600(%rsp)
+;   vmovdqu32 %zmm23, 0x640(%rsp)
+;   vmovdqu32 %zmm24, 0x680(%rsp)
+;   vmovdqu32 %zmm25, 0x6c0(%rsp)
+;   vmovdqu32 %zmm26, 0x700(%rsp)
+;   vmovdqu32 %zmm27, 0x740(%rsp)
+;   vmovdqu32 %zmm28, 0x780(%rsp)
+;   vmovdqu32 %zmm29, 0x7c0(%rsp)
+;   vmovdqu32 %zmm30, 0x800(%rsp)
+;   vmovdqu32 %zmm31, 0x840(%rsp)
+;   kmovq 2176(%rsp), %k2
+;   kmovq 2184(%rsp), %k3
+;   kmovq 2192(%rsp), %k4
+;   kmovq 2200(%rsp), %k5
+;   kmovq 2208(%rsp), %k6
+;   kmovq 2216(%rsp), %k7
+; block0:
+;   load_ext_name %libcall+0, %rdx
+;   call    *%rdx
+;   movq (%rsp), %rax
+;   movq 8(%rsp), %rcx
+;   movq 0x10(%rsp), %rdx
+;   movq 0x18(%rsp), %rsi
+;   movq 0x20(%rsp), %rdi
+;   movq 0x28(%rsp), %r8
+;   movq 0x30(%rsp), %r9
+;   movq 0x38(%rsp), %r10
+;   movq 0x40(%rsp), %r11
+;   vmovdqu32 0x80(%rsp), %zmm0
+;   vmovdqu32 0xc0(%rsp), %zmm1
+;   vmovdqu32 0x100(%rsp), %zmm2
+;   vmovdqu32 0x140(%rsp), %zmm3
+;   vmovdqu32 0x180(%rsp), %zmm4
+;   vmovdqu32 0x1c0(%rsp), %zmm5
+;   vmovdqu32 0x200(%rsp), %zmm6
+;   vmovdqu32 0x240(%rsp), %zmm7
+;   vmovdqu32 0x280(%rsp), %zmm8
+;   vmovdqu32 0x2c0(%rsp), %zmm9
+;   vmovdqu32 0x300(%rsp), %zmm10
+;   vmovdqu32 0x340(%rsp), %zmm11
+;   vmovdqu32 0x380(%rsp), %zmm12
+;   vmovdqu32 0x3c0(%rsp), %zmm13
+;   vmovdqu32 0x400(%rsp), %zmm14
+;   vmovdqu32 0x440(%rsp), %zmm15
+;   vmovdqu32 0x480(%rsp), %zmm16
+;   vmovdqu32 0x4c0(%rsp), %zmm17
+;   vmovdqu32 0x500(%rsp), %zmm18
+;   vmovdqu32 0x540(%rsp), %zmm19
+;   vmovdqu32 0x580(%rsp), %zmm20
+;   vmovdqu32 0x5c0(%rsp), %zmm21
+;   vmovdqu32 0x600(%rsp), %zmm22
+;   vmovdqu32 0x640(%rsp), %zmm23
+;   vmovdqu32 0x680(%rsp), %zmm24
+;   vmovdqu32 0x6c0(%rsp), %zmm25
+;   vmovdqu32 0x700(%rsp), %zmm26
+;   vmovdqu32 0x740(%rsp), %zmm27
+;   vmovdqu32 0x780(%rsp), %zmm28
+;   vmovdqu32 0x7c0(%rsp), %zmm29
+;   vmovdqu32 0x800(%rsp), %zmm30
+;   vmovdqu32 0x840(%rsp), %zmm31
+;   kmovq %k2, 2176(%rsp)
+;   kmovq %k3, 2184(%rsp)
+;   kmovq %k4, 2192(%rsp)
+;   kmovq %k5, 2200(%rsp)
+;   kmovq %k6, 2208(%rsp)
+;   kmovq %k7, 2216(%rsp)
+;   addq $0x8b0, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x8b0, %rsp
+;   movq %rax, (%rsp)
+;   movq %rcx, 8(%rsp)
+;   movq %rdx, 0x10(%rsp)
+;   movq %rsi, 0x18(%rsp)
+;   movq %rdi, 0x20(%rsp)
+;   movq %r8, 0x28(%rsp)
+;   movq %r9, 0x30(%rsp)
+;   movq %r10, 0x38(%rsp)
+;   movq %r11, 0x40(%rsp)
+;   vmovdqu32 %zmm0, 0x80(%rsp)
+;   vmovdqu32 %zmm1, 0xc0(%rsp)
+;   vmovdqu32 %zmm2, 0x100(%rsp)
+;   vmovdqu32 %zmm3, 0x140(%rsp)
+;   vmovdqu32 %zmm4, 0x180(%rsp)
+;   vmovdqu32 %zmm5, 0x1c0(%rsp)
+;   vmovdqu32 %zmm6, 0x200(%rsp)
+;   vmovdqu32 %zmm7, 0x240(%rsp)
+;   vmovdqu32 %zmm8, 0x280(%rsp)
+;   vmovdqu32 %zmm9, 0x2c0(%rsp)
+;   vmovdqu32 %zmm10, 0x300(%rsp)
+;   vmovdqu32 %zmm11, 0x340(%rsp)
+;   vmovdqu32 %zmm12, 0x380(%rsp)
+;   vmovdqu32 %zmm13, 0x3c0(%rsp)
+;   vmovdqu32 %zmm14, 0x400(%rsp)
+;   vmovdqu32 %zmm15, 0x440(%rsp)
+;   vmovdqu32 %zmm16, 0x480(%rsp)
+;   vmovdqu32 %zmm17, 0x4c0(%rsp)
+;   vmovdqu32 %zmm18, 0x500(%rsp)
+;   vmovdqu32 %zmm19, 0x540(%rsp)
+;   vmovdqu32 %zmm20, 0x580(%rsp)
+;   vmovdqu32 %zmm21, 0x5c0(%rsp)
+;   vmovdqu32 %zmm22, 0x600(%rsp)
+;   vmovdqu32 %zmm23, 0x640(%rsp)
+;   vmovdqu32 %zmm24, 0x680(%rsp)
+;   vmovdqu32 %zmm25, 0x6c0(%rsp)
+;   vmovdqu32 %zmm26, 0x700(%rsp)
+;   vmovdqu32 %zmm27, 0x740(%rsp)
+;   vmovdqu32 %zmm28, 0x780(%rsp)
+;   vmovdqu32 %zmm29, 0x7c0(%rsp)
+;   vmovdqu32 %zmm30, 0x800(%rsp)
+;   vmovdqu32 %zmm31, 0x840(%rsp)
+;   kmovq %k2, 0x880(%rsp)
+;   kmovq %k3, 0x888(%rsp)
+;   kmovq %k4, 0x890(%rsp)
+;   kmovq %k5, 0x898(%rsp)
+;   kmovq %k6, 0x8a0(%rsp)
+;   kmovq %k7, 0x8a8(%rsp)
+; block1: ; offset 0x173
+;   movabsq $0, %rdx ; reloc_external Abs8 %libcall 0
+;   callq *%rdx
+;   movq (%rsp), %rax
+;   movq 8(%rsp), %rcx
+;   movq 0x10(%rsp), %rdx
+;   movq 0x18(%rsp), %rsi
+;   movq 0x20(%rsp), %rdi
+;   movq 0x28(%rsp), %r8
+;   movq 0x30(%rsp), %r9
+;   movq 0x38(%rsp), %r10
+;   movq 0x40(%rsp), %r11
+;   vmovdqu32 0x80(%rsp), %zmm0
+;   vmovdqu32 0xc0(%rsp), %zmm1
+;   vmovdqu32 0x100(%rsp), %zmm2
+;   vmovdqu32 0x140(%rsp), %zmm3
+;   vmovdqu32 0x180(%rsp), %zmm4
+;   vmovdqu32 0x1c0(%rsp), %zmm5
+;   vmovdqu32 0x200(%rsp), %zmm6
+;   vmovdqu32 0x240(%rsp), %zmm7
+;   vmovdqu32 0x280(%rsp), %zmm8
+;   vmovdqu32 0x2c0(%rsp), %zmm9
+;   vmovdqu32 0x300(%rsp), %zmm10
+;   vmovdqu32 0x340(%rsp), %zmm11
+;   vmovdqu32 0x380(%rsp), %zmm12
+;   vmovdqu32 0x3c0(%rsp), %zmm13
+;   vmovdqu32 0x400(%rsp), %zmm14
+;   vmovdqu32 0x440(%rsp), %zmm15
+;   vmovdqu32 0x480(%rsp), %zmm16
+;   vmovdqu32 0x4c0(%rsp), %zmm17
+;   vmovdqu32 0x500(%rsp), %zmm18
+;   vmovdqu32 0x540(%rsp), %zmm19
+;   vmovdqu32 0x580(%rsp), %zmm20
+;   vmovdqu32 0x5c0(%rsp), %zmm21
+;   vmovdqu32 0x600(%rsp), %zmm22
+;   vmovdqu32 0x640(%rsp), %zmm23
+;   vmovdqu32 0x680(%rsp), %zmm24
+;   vmovdqu32 0x6c0(%rsp), %zmm25
+;   vmovdqu32 0x700(%rsp), %zmm26
+;   vmovdqu32 0x740(%rsp), %zmm27
+;   vmovdqu32 0x780(%rsp), %zmm28
+;   vmovdqu32 0x7c0(%rsp), %zmm29
+;   vmovdqu32 0x800(%rsp), %zmm30
+;   vmovdqu32 0x840(%rsp), %zmm31
+;   kmovq 0x880(%rsp), %k2
+;   kmovq 0x888(%rsp), %k3
+;   kmovq 0x890(%rsp), %k4
+;   kmovq 0x898(%rsp), %k5
+;   kmovq 0x8a0(%rsp), %k6
+;   kmovq 0x8a8(%rsp), %k7
+;   addq $0x8b0, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+;; A leaf preserve_all function whose body uses 512-bit ops and k-registers
+;; (icmp on i32x16 goes through VPCMPD -> k-reg -> VPMOVM2D): the registers
+;; it actually clobbers -- and only those -- must be saved, with full-width
+;; ZMM saves and a kmovq save for the k-register.
+function %preserve_all_avx512_body(i64, i64) preserve_all {
+block0(v0: i64, v1: i64):
+    v2 = load.i32x16 v0
+    v3 = load.i32x16 v1
+    v4 = icmp eq v2, v3
+    store v4, v0
+    return
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0xd0, %rsp
+;   movq %rsi, (%rsp)
+;   movq %rdi, 8(%rsp)
+;   vmovdqu32 %zmm5, 0x40(%rsp)
+;   vmovdqu32 %zmm6, 0x80(%rsp)
+;   kmovq 192(%rsp), %k4
+; block0:
+;   vmovdqu32 (%rdi), %zmm5
+;   vpcmpd $0x0, (%rsi), %zmm5, %k4
+;   vpmovm2d %k4, %zmm6
+;   vmovdqu32 %zmm6, (%rdi)
+;   movq (%rsp), %rsi
+;   movq 8(%rsp), %rdi
+;   vmovdqu32 0x40(%rsp), %zmm5
+;   vmovdqu32 0x80(%rsp), %zmm6
+;   kmovq %k4, 192(%rsp)
+;   addq $0xd0, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0xd0, %rsp
+;   movq %rsi, (%rsp)
+;   movq %rdi, 8(%rsp)
+;   vmovdqu32 %zmm5, 0x40(%rsp)
+;   vmovdqu32 %zmm6, 0x80(%rsp)
+;   kmovq %k4, 0xc0(%rsp)
+; block1: ; offset 0x2e
+;   vmovdqu32 (%rdi), %zmm5 ; trap: heap_oob
+;   vpcmpeqd (%rsi), %zmm5, %k4 ; trap: heap_oob
+;   vpmovm2d %k4, %zmm6
+;   vmovdqu32 %zmm6, (%rdi) ; trap: heap_oob
+;   movq (%rsp), %rsi
+;   movq 8(%rsp), %rdi
+;   vmovdqu32 0x40(%rsp), %zmm5
+;   vmovdqu32 0x80(%rsp), %zmm6
+;   kmovq 0xc0(%rsp), %k4
+;   addq $0xd0, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+;; A leaf preserve_all function under AVX-512 flags that uses no vector ops
+;; at all: it must not save k-registers or any xmm state it does not clobber.
+function %preserve_all_scalar_only(i64, i64) preserve_all {
+block0(v0: i64, v1: i64):
+    v2 = iadd v0, v1
+    store v2, v0
+    return
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x10, %rsp
+;   movq %rsi, (%rsp)
+;   movq %rdi, 8(%rsp)
+; block0:
+;   leaq (%rdi, %rsi), %rsi
+;   movq %rsi, (%rdi)
+;   movq (%rsp), %rsi
+;   movq 8(%rsp), %rdi
+;   addq $0x10, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x10, %rsp
+;   movq %rsi, (%rsp)
+;   movq %rdi, 8(%rsp)
+; block1: ; offset 0x11
+;   addq %rdi, %rsi
+;   movq %rsi, (%rdi) ; trap: heap_oob
+;   movq (%rsp), %rsi
+;   movq 8(%rsp), %rdi
+;   addq $0x10, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
