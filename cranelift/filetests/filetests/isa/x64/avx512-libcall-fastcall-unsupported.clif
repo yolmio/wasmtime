@@ -1,0 +1,27 @@
+test compile expect-fail
+set libcall_call_conv=windows_fastcall
+target x86_64 has_avx512f has_avx512bw has_avx512dq has_avx512vl
+
+;; With AVX-512 enabled, libcalls resolving to the windows_fastcall calling
+;; convention must be rejected. Libcall signatures are synthesized during
+;; lowering (`emit_vm_call`) and never enter `func.dfg.signatures`, so the
+;; signature-based fastcall rejection cannot see them; previously an `fma`
+;; libcall was emitted with the fastcall convention while a 512-bit value was
+;; live in zmm6 across the call -- Win64 only preserves the low 128 bits of
+;; xmm6-xmm15. The rejection is coarse (any function might emit a libcall),
+;; so even an all-scalar leaf function fails under this configuration.
+function %leaf(i64) -> i64 {
+block0(v0: i64):
+    return v0
+}
+
+;; The reviewer's original repro shape: fma lowers to a LIBCALL with a
+;; 512-bit value live across it.
+function %libcall_bypass(i64, f64, f64, f64) -> f64x8 {
+block0(v0: i64, v1: f64, v2: f64, v3: f64):
+    v4 = load.f64x8 notrap aligned v0
+    v5 = fma v1, v2, v3
+    v6 = splat.f64x8 v5
+    v7 = fadd v4, v6
+    return v7
+}

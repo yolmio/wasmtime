@@ -107,6 +107,61 @@ impl X64Backend {
                         .to_owned(),
                 ));
             }
+
+            // The check above only sees signatures present in the IR. Libcall
+            // signatures are synthesized during lowering (`emit_vm_call`
+            // builds them via `CallConv::for_libcall(flags,
+            // CallConv::triple_default(triple))`) and never enter
+            // `func.dfg.signatures`, so a windows_fastcall libcall (selected
+            // by the `libcall_call_conv` flag, or by default on Windows
+            // triples) would slip past it while a 512-bit value is live in
+            // xmm6-xmm15 across the call. Any function might emit a libcall
+            // (fma, floor, ceil, mem*, ...), and predicting which lowerings
+            // will is fragile, so this is coarse but sound: reject whenever
+            // the resolved libcall convention for this backend is
+            // windows_fastcall. This mirrors exactly how `emit_vm_call`
+            // computes the libcall convention.
+            let libcall_conv = crate::isa::CallConv::for_libcall(
+                &self.flags,
+                crate::isa::CallConv::triple_default(&self.triple),
+            );
+            if libcall_conv == crate::isa::CallConv::WindowsFastcall {
+                return Err(CodegenError::Unsupported(
+                    "libcalls resolve to the windows_fastcall calling \
+                     convention (via the libcall_call_conv flag or the \
+                     target triple's default), which is not supported with \
+                     AVX-512 (has_avx512f): Win64 only preserves the low 128 \
+                     bits of xmm6-xmm15 across calls"
+                        .to_owned(),
+                ));
+            }
+        } else {
+            // Without has_avx512f the backend has no instructions that can
+            // move vectors wider than 128 bits: the register-passing ABI
+            // code would still assign a 512-bit argument or return value to
+            // an XMM register, and any spill/reload of it would use a
+            // 16-byte `movdqu`, silently truncating the upper 384 bits. Wide
+            // vector values cannot originate inside a function body without
+            // the AVX-512 lowering rules (those lowerings have no non-AVX-512
+            // fallback and fail cleanly), so signatures are the only way such
+            // a value can enter a function; reject them here. Scalar types
+            // are at most 16 bytes (i128), so only fixed-width vectors can
+            // exceed this limit.
+            let has_wide_vector = |sig: &ir::Signature| {
+                sig.params
+                    .iter()
+                    .chain(sig.returns.iter())
+                    .any(|param| param.value_type.bytes() > 16)
+            };
+            if has_wide_vector(&func.signature) || func.dfg.signatures.values().any(has_wide_vector)
+            {
+                return Err(CodegenError::Unsupported(
+                    "vector types wider than 128 bits in function signatures \
+                     require AVX-512: enable has_avx512f, has_avx512bw, \
+                     has_avx512dq, and has_avx512vl"
+                        .to_owned(),
+                ));
+            }
         }
 
         // This performs lowering to VCode, register-allocates the code, computes
@@ -419,5 +474,142 @@ mod tests {
         let mut ctx = Context::for_function(empty_function(CallConv::WindowsFastcall));
         ctx.compile(&*isa, &mut Default::default())
             .expect("windows_fastcall without AVX-512 must still compile");
+    }
+
+    fn avx512_isa_for(triple: Triple, shared: Flags) -> OwnedTargetIsa {
+        let mut builder = isa_builder(triple);
+        for flag in AVX512_FLAGS {
+            builder.enable(flag).unwrap();
+        }
+        builder.finish(shared).unwrap()
+    }
+
+    fn expect_unsupported(isa: &dyn TargetIsa, func: Function, needle: &str) {
+        let mut ctx = Context::for_function(func);
+        match ctx.compile(isa, &mut Default::default()) {
+            Err(err) => {
+                let msg = err.inner.to_string();
+                assert!(msg.contains(needle), "unexpected error: {msg}");
+            }
+            Ok(_) => panic!("expected compilation to be rejected ({needle})"),
+        }
+    }
+
+    /// Without AVX-512, a register-passed 512-bit argument would be assigned
+    /// to an XMM register and spilled/reloaded with 16-byte `movdqu`,
+    /// silently truncating it. Such signatures must be rejected cleanly.
+    #[test]
+    fn wide_vector_param_rejected_without_avx512() {
+        let isa = isa_builder(triple()).finish(shared_flags()).unwrap();
+
+        let mut sig = Signature::new(CallConv::SystemV);
+        sig.params.push(ir::AbiParam::new(types::I32X16));
+        let mut func = Function::with_name_signature(UserFuncName::default(), sig);
+        let block0 = func.dfg.make_block();
+        func.dfg.append_block_param(block0, types::I32X16);
+        let mut cur = FuncCursor::new(&mut func);
+        cur.insert_block(block0);
+        cur.ins().return_(&[]);
+
+        expect_unsupported(&*isa, func, "wider than 128 bits");
+    }
+
+    /// Same for a 512-bit return value.
+    #[test]
+    fn wide_vector_return_rejected_without_avx512() {
+        let isa = isa_builder(triple()).finish(shared_flags()).unwrap();
+
+        let mut sig = Signature::new(CallConv::SystemV);
+        sig.returns.push(ir::AbiParam::new(types::F64X8));
+        let mut func = Function::with_name_signature(UserFuncName::default(), sig);
+        let block0 = func.dfg.make_block();
+        let mut cur = FuncCursor::new(&mut func);
+        cur.insert_block(block0);
+        let zero = cur.ins().f64const(0.0);
+        let vec = cur.ins().splat(types::F64X8, zero);
+        cur.ins().return_(&[vec]);
+
+        expect_unsupported(&*isa, func, "wider than 128 bits");
+    }
+
+    /// ... and for a merely *referenced* signature containing a wide vector
+    /// (i.e. calling such a function), even when the caller's own signature
+    /// is all-scalar.
+    #[test]
+    fn wide_vector_in_referenced_sig_rejected_without_avx512() {
+        let isa = isa_builder(triple()).finish(shared_flags()).unwrap();
+
+        let mut func = empty_function(CallConv::SystemV);
+        let mut sig0 = Signature::new(CallConv::SystemV);
+        sig0.params.push(ir::AbiParam::new(types::I16X32));
+        func.import_signature(sig0);
+
+        expect_unsupported(&*isa, func, "wider than 128 bits");
+    }
+
+    /// Sanity check for the above: all-scalar signatures (including the
+    /// 16-byte i128, which sits exactly on the limit) still compile without
+    /// AVX-512.
+    #[test]
+    fn scalar_signature_accepted_without_avx512() {
+        // i128 args/returns additionally require the LLVM ABI extensions.
+        let mut shared = shared_settings::builder();
+        shared.enable("enable_llvm_abi_extensions").unwrap();
+        let isa = isa_builder(triple()).finish(Flags::new(shared)).unwrap();
+
+        let mut sig = Signature::new(CallConv::SystemV);
+        sig.params.push(ir::AbiParam::new(types::I64));
+        sig.params.push(ir::AbiParam::new(types::I128));
+        sig.params.push(ir::AbiParam::new(types::F64X2));
+        let mut func = Function::with_name_signature(UserFuncName::default(), sig);
+        let block0 = func.dfg.make_block();
+        func.dfg.append_block_param(block0, types::I64);
+        func.dfg.append_block_param(block0, types::I128);
+        func.dfg.append_block_param(block0, types::F64X2);
+        let mut cur = FuncCursor::new(&mut func);
+        cur.insert_block(block0);
+        cur.ins().return_(&[]);
+
+        let mut ctx = Context::for_function(func);
+        ctx.compile(&*isa, &mut Default::default())
+            .expect("scalar/128-bit signatures without AVX-512 must compile");
+    }
+
+    /// With AVX-512 enabled, libcalls resolving to windows_fastcall (via the
+    /// `libcall_call_conv` flag) must be rejected: libcall signatures are
+    /// synthesized during lowering and never enter `dfg.signatures`, so the
+    /// signature-based fastcall check cannot see them.
+    #[test]
+    fn fastcall_libcall_conv_rejected_with_avx512() {
+        let mut shared = shared_settings::builder();
+        shared.set("libcall_call_conv", "windows_fastcall").unwrap();
+        let isa = avx512_isa_for(triple(), Flags::new(shared));
+
+        expect_unsupported(&*isa, empty_function(CallConv::SystemV), "windows_fastcall");
+    }
+
+    /// Same via a Windows target triple, whose *default* libcall convention
+    /// is windows_fastcall (with `libcall_call_conv=isa_default`).
+    #[test]
+    fn windows_triple_default_libcall_conv_rejected_with_avx512() {
+        let isa = avx512_isa_for("x86_64-pc-windows-msvc".parse().unwrap(), shared_flags());
+
+        expect_unsupported(&*isa, empty_function(CallConv::SystemV), "windows_fastcall");
+    }
+
+    /// Sanity check for the above: explicitly routing libcalls to system_v
+    /// makes the same Windows-triple configuration compile again.
+    #[test]
+    fn system_v_libcall_conv_accepted_with_avx512() {
+        let mut shared = shared_settings::builder();
+        shared.set("libcall_call_conv", "system_v").unwrap();
+        let isa = avx512_isa_for(
+            "x86_64-pc-windows-msvc".parse().unwrap(),
+            Flags::new(shared),
+        );
+
+        let mut ctx = Context::for_function(empty_function(CallConv::SystemV));
+        ctx.compile(&*isa, &mut Default::default())
+            .expect("system_v libcalls with AVX-512 must compile");
     }
 }

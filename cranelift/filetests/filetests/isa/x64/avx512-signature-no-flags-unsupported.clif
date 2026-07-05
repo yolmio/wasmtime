@@ -1,0 +1,47 @@
+test compile expect-fail
+target x86_64
+
+;; Without the AVX-512 feature flags, vector types wider than 128 bits in
+;; function signatures must be rejected with a clean
+;; `CodegenError::Unsupported`.
+;;
+;; Previously a register-passed 512-bit argument or return value was accepted
+;; and assigned to an XMM register; spilling/reloading it (e.g. across a
+;; call) used a 16-byte `movdqu`, silently truncating the upper 384 bits.
+;; Wide vector values cannot originate inside a plain-x86_64 function body
+;; (the AVX-512 lowerings have no fallback and fail cleanly), so signatures
+;; are the only entry point.
+
+;; A 512-bit passthrough held live across a call: previously compiled with a
+;; truncating 128-bit spill/reload of v0.
+function %passthru_across_call(i32x16) -> i32x16 {
+    sig0 = () -> i64 system_v
+    fn0 = %ext sig0
+block0(v0: i32x16):
+    v1 = call fn0()
+    return v0
+}
+
+;; A 512-bit return value alone is enough.
+function %wide_return() -> f64x8 {
+block0:
+    v0 = f64const 0.0
+    v1 = splat.f64x8 v0
+    return v1
+}
+
+;; ... as is merely *referencing* a signature with a wide vector, even when
+;; the function's own signature is all-scalar.
+function %references_wide_sig() {
+    sig0 = (i16x32) system_v
+    fn0 = %g sig0
+block0:
+    return
+}
+
+;; 256-bit vectors also require the AVX-512 flags on this backend (loads and
+;; stores use the VL-encoded forms of `vmovdqu32`).
+function %wide_256_param(i8x32) {
+block0(v0: i8x32):
+    return
+}
