@@ -51,6 +51,23 @@ impl X64Backend {
             ));
         }
 
+        // The AVX-512 support in this backend assumes that `has_avx512f`
+        // implies the BW, DQ, and VL extensions as well: k-mask register
+        // spills/reloads use `kmovq` (AVX512BW), the vector icmp/fcmp/
+        // bitselect lowerings use `vpmovm2*`/`vpmov*2m` (AVX512BW/DQ), and
+        // 256-bit loads/stores use the VL-encoded forms of `vmovdqu32`.
+        // Rather than guarding every lowering rule individually, enforce the
+        // feature-set invariant once at backend construction.
+        if x64_flags.has_avx512f()
+            && !(x64_flags.has_avx512bw() && x64_flags.has_avx512dq() && x64_flags.has_avx512vl())
+        {
+            return Err(CodegenError::Unsupported(
+                "has_avx512f requires has_avx512bw, has_avx512dq, and has_avx512vl: \
+                 enable all four AVX-512 flags or disable has_avx512f"
+                    .to_owned(),
+            ));
+        }
+
         Ok(Self {
             triple,
             flags,
@@ -64,6 +81,34 @@ impl X64Backend {
         domtree: &DominatorTree,
         ctrl_plane: &mut ControlPlane,
     ) -> CodegenResult<(VCode<inst::Inst>, regalloc2::Output)> {
+        // Win64 (windows_fastcall) preserves only the low 128 bits of the
+        // callee-saved registers xmm6-xmm15 across calls: the upper bits of
+        // the corresponding ymm/zmm registers are volatile. With AVX-512
+        // enabled, 512-bit values may live in any function body (not just in
+        // signatures), and keeping one in xmm6-xmm15 across a
+        // fastcall-convention call would silently truncate it to 128 bits.
+        // The clobber and callee-save sets are convention-keyed constants
+        // with no access to ISA flags, so we conservatively reject the
+        // combination here: no function may itself use windows_fastcall, or
+        // reference a windows_fastcall signature (i.e. make such a call),
+        // while AVX-512 is enabled.
+        if self.x64_flags.has_avx512f() {
+            let uses_fastcall = func.signature.call_conv == crate::isa::CallConv::WindowsFastcall
+                || func
+                    .dfg
+                    .signatures
+                    .values()
+                    .any(|sig| sig.call_conv == crate::isa::CallConv::WindowsFastcall);
+            if uses_fastcall {
+                return Err(CodegenError::Unsupported(
+                    "the windows_fastcall calling convention is not supported \
+                     with AVX-512 (has_avx512f): Win64 only preserves the low \
+                     128 bits of xmm6-xmm15 across calls"
+                        .to_owned(),
+                ));
+            }
+        }
+
         // This performs lowering to VCode, register-allocates the code, computes
         // block layout and finalizes branches. The result is ready for binary emission.
         let emit_info = EmitInfo::new(self.flags.clone(), self.x64_flags.clone());
@@ -269,4 +314,110 @@ fn isa_constructor(
     let isa_flags = x64_settings::Flags::new(&shared_flags, builder);
     let backend = X64Backend::new_with_flags(triple, shared_flags, isa_flags)?;
     Ok(backend.wrapped())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Context;
+    use crate::cursor::{Cursor, FuncCursor};
+    use crate::ir::{InstBuilder, Signature, UserFuncName};
+    use crate::isa::CallConv;
+    use crate::settings::Configurable;
+    use alloc::string::ToString;
+
+    fn triple() -> Triple {
+        "x86_64".parse().unwrap()
+    }
+
+    fn shared_flags() -> Flags {
+        Flags::new(shared_settings::builder())
+    }
+
+    const AVX512_FLAGS: [&str; 4] = [
+        "has_avx512f",
+        "has_avx512bw",
+        "has_avx512dq",
+        "has_avx512vl",
+    ];
+
+    /// B5: `has_avx512f` without any one of BW/DQ/VL must be rejected at
+    /// backend construction, since the lowering rules assume F implies all
+    /// three.
+    #[test]
+    fn avx512f_requires_bw_dq_vl() {
+        for missing in &AVX512_FLAGS[1..] {
+            let mut builder = isa_builder(triple());
+            builder.enable("has_avx512f").unwrap();
+            for flag in &AVX512_FLAGS[1..] {
+                if flag != missing {
+                    builder.enable(flag).unwrap();
+                }
+            }
+            match builder.finish(shared_flags()) {
+                Err(CodegenError::Unsupported(msg)) => {
+                    assert!(
+                        msg.contains("has_avx512f requires"),
+                        "unexpected error message: {msg}"
+                    );
+                }
+                Err(err) => panic!("unexpected error kind: {err:?}"),
+                Ok(_) => panic!("expected has_avx512f without {missing} to be rejected"),
+            }
+        }
+    }
+
+    #[test]
+    fn avx512f_with_all_extensions_is_accepted() {
+        let mut builder = isa_builder(triple());
+        for flag in AVX512_FLAGS {
+            builder.enable(flag).unwrap();
+        }
+        builder
+            .finish(shared_flags())
+            .expect("all four AVX-512 flags together must be accepted");
+    }
+
+    fn empty_function(call_conv: CallConv) -> Function {
+        let mut func =
+            Function::with_name_signature(UserFuncName::default(), Signature::new(call_conv));
+        let block0 = func.dfg.make_block();
+        let mut cur = FuncCursor::new(&mut func);
+        cur.insert_block(block0);
+        cur.ins().return_(&[]);
+        func
+    }
+
+    /// B3/B4: with AVX-512 enabled, windows_fastcall must be rejected for
+    /// *any* function using that convention, even when no wide vector type
+    /// appears in its signature, because 512-bit values live across a call
+    /// would be kept in xmm6-xmm15, of which Win64 preserves only the low
+    /// 128 bits.
+    #[test]
+    fn fastcall_rejected_with_avx512() {
+        let mut builder = isa_builder(triple());
+        for flag in AVX512_FLAGS {
+            builder.enable(flag).unwrap();
+        }
+        let isa = builder.finish(shared_flags()).unwrap();
+
+        let mut ctx = Context::for_function(empty_function(CallConv::WindowsFastcall));
+        match ctx.compile(&*isa, &mut Default::default()) {
+            Err(err) => {
+                let msg = err.inner.to_string();
+                assert!(msg.contains("windows_fastcall"), "unexpected error: {msg}");
+            }
+            Ok(_) => panic!("expected windows_fastcall + has_avx512f to be rejected"),
+        }
+    }
+
+    /// Sanity check for the above: the same function compiles fine when
+    /// AVX-512 is not enabled.
+    #[test]
+    fn fastcall_accepted_without_avx512() {
+        let isa = isa_builder(triple()).finish(shared_flags()).unwrap();
+        let mut ctx = Context::for_function(empty_function(CallConv::WindowsFastcall));
+        ctx.compile(&*isa, &mut Default::default())
+            .expect("windows_fastcall without AVX-512 must still compile");
+    }
 }

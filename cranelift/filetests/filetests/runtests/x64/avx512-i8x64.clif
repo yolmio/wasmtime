@@ -1,7 +1,7 @@
 test run
 set opt_level=none
 set enable_simd32=true
-target x86_64 has_avx512f has_avx512vl has_avx512bw
+target x86_64 has_avx512f has_avx512vl has_avx512bw has_avx512dq
 
 function %avx512_i8x64_cmp_mask() -> i64 {
 block0:

@@ -1,0 +1,119 @@
+test compile precise-output
+target x86_64 has_avx512f has_avx512bw has_avx512dq has_avx512vl
+
+;; Register-passed 512-bit vector arguments must keep working: SysV passes the
+;; first eight vector arguments in zmm0-zmm7. (The 9th argument would go on
+;; the stack and is rejected; see avx512-abi-unsupported.clif.)
+
+function %eight_zmm_args(i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16, v2: i32x16, v3: i32x16, v4: i32x16, v5: i32x16, v6: i32x16, v7: i32x16):
+    v8 = iadd v0, v1
+    v9 = iadd v2, v3
+    v10 = iadd v4, v5
+    v11 = iadd v6, v7
+    v12 = iadd v8, v9
+    v13 = iadd v10, v11
+    v14 = iadd v12, v13
+    return v14
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vpaddd %zmm1, %zmm0, %zmm0
+;   vpaddd %zmm3, %zmm2, %zmm1
+;   vpaddd %zmm5, %zmm4, %zmm2
+;   vpaddd %zmm7, %zmm6, %zmm3
+;   vpaddd %zmm1, %zmm0, %zmm0
+;   vpaddd %zmm3, %zmm2, %zmm1
+;   vpaddd %zmm1, %zmm0, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vpaddd %zmm1, %zmm0, %zmm0
+;   vpaddd %zmm3, %zmm2, %zmm1
+;   vpaddd %zmm5, %zmm4, %zmm2
+;   vpaddd %zmm7, %zmm6, %zmm3
+;   vpaddd %zmm1, %zmm0, %zmm0
+;   vpaddd %zmm3, %zmm2, %zmm1
+;   vpaddd %zmm1, %zmm0, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %eight_zmm_args_last(i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16, v2: i32x16, v3: i32x16, v4: i32x16, v5: i32x16, v6: i32x16, v7: i32x16):
+    return v7
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vmovdqu32 %zmm7, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vmovdqu32 %zmm7, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+;; Calling a function with eight register-passed 512-bit arguments must also
+;; keep working.
+function %call_eight_zmm_args(i32x16) -> i32x16 {
+    sig0 = (i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16) -> i32x16 system_v
+    fn0 = %eight_zmm_args sig0
+block0(v0: i32x16):
+    v1 = call fn0(v0, v0, v0, v0, v0, v0, v0, v0)
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   load_ext_name %eight_zmm_args+0, %rsi
+;   vmovdqu32 %zmm0, %zmm7
+;   vmovdqu32 %zmm7, %zmm1
+;   vmovdqu32 %zmm7, %zmm2
+;   vmovdqu32 %zmm7, %zmm3
+;   vmovdqu32 %zmm7, %zmm4
+;   vmovdqu32 %zmm7, %zmm5
+;   vmovdqu32 %zmm7, %zmm6
+;   call    *%rsi
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movabsq $0, %rsi ; reloc_external Abs8 %eight_zmm_args 0
+;   vmovdqu32 %zmm0, %zmm7
+;   vmovdqu32 %zmm7, %zmm1
+;   vmovdqu32 %zmm7, %zmm2
+;   vmovdqu32 %zmm7, %zmm3
+;   vmovdqu32 %zmm7, %zmm4
+;   vmovdqu32 %zmm7, %zmm5
+;   vmovdqu32 %zmm7, %zmm6
+;   callq *%rsi
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+

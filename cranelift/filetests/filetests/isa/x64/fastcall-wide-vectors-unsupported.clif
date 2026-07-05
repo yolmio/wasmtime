@@ -1,0 +1,25 @@
+test compile expect-fail
+target x86_64
+
+;; windows_fastcall passes 128-bit-and-wider vectors indirectly through a
+;; 16-byte buffer, which cannot hold a 256/512-bit value (a 64-byte store into
+;; it would smash the stack, overwriting the return address). Wide vectors in
+;; fastcall signatures are rejected regardless of ISA flags.
+function %fastcall_zmm_arg(i32x16) windows_fastcall {
+block0(v0: i32x16):
+    return
+}
+
+function %fastcall_zmm_ret() -> f64x8 windows_fastcall {
+block0:
+    v0 = f64const 0.0
+    v1 = splat.f64x8 v0
+    return v1
+}
+
+;; Stack-passed 512-bit arguments are rejected on SysV as well, independent of
+;; whether AVX-512 flags are set.
+function %nine_zmm_args_sysv(i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16, v2: i32x16, v3: i32x16, v4: i32x16, v5: i32x16, v6: i32x16, v7: i32x16, v8: i32x16):
+    return v8
+}

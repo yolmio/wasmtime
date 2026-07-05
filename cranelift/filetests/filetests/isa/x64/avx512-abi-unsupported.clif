@@ -1,0 +1,38 @@
+test compile expect-fail
+target x86_64 has_avx512f has_avx512bw has_avx512dq has_avx512vl
+
+;; 512-bit vector arguments that do not fit in registers would previously be
+;; passed in a 16-byte stack slot, silently truncating them (e.g. the 9th
+;; i32x16 argument was moved with a 128-bit `movdqu`). These must now be
+;; rejected with a clean `CodegenError::Unsupported` instead of miscompiling.
+
+;; SysV passes vector args in xmm0-xmm7; the 9th 512-bit arg would go on the
+;; stack.
+function %nine_zmm_args_sysv(i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16, v2: i32x16, v3: i32x16, v4: i32x16, v5: i32x16, v6: i32x16, v7: i32x16, v8: i32x16):
+    return v8
+}
+
+;; Same for the tail calling convention (also 8 vector arg registers).
+function %nine_zmm_args_tail(i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16, i32x16) -> i32x16 tail {
+block0(v0: i32x16, v1: i32x16, v2: i32x16, v3: i32x16, v4: i32x16, v5: i32x16, v6: i32x16, v7: i32x16, v8: i32x16):
+    return v8
+}
+
+;; windows_fastcall is rejected outright when AVX-512 is enabled, even with no
+;; wide vector in the signature: Win64 only preserves the low 128 bits of the
+;; callee-saved registers xmm6-xmm15, so any 512-bit value live across a call
+;; would be truncated.
+function %fastcall_func_with_avx512() windows_fastcall {
+block0:
+    return
+}
+
+;; ... and the same applies to merely *calling* a windows_fastcall signature.
+function %calls_fastcall_with_avx512() {
+    sig0 = () windows_fastcall
+    fn0 = %g sig0
+block0:
+    call fn0()
+    return
+}

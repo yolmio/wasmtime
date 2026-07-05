@@ -1,0 +1,222 @@
+test compile precise-output
+set enable_simd32=true
+target x86_64 has_avx512f has_avx512bw has_avx512dq has_avx512vl
+
+;; Regression test for xmm16-xmm31 missing from the call clobber sets: with
+;; `enable_simd32` the extended AVX-512 registers are allocatable, and 512-bit
+;; values live across a call used to be kept in zmm16-zmm31 with no spill,
+;; even though all vector registers (including xmm16-xmm31) are caller-saved
+;; in the System V ABI. With the clobber sets fixed, every value below that is
+;; live across the call must be spilled before it and reloaded after it -- no
+;; vector register may hold a live value across the `call`.
+
+function %zmm_live_across_call(i64) -> i32x16 {
+    sig0 = () system_v
+    fn0 = %g sig0
+block0(v0: i64):
+    v1 = load.i32x16 v0
+    v2 = load.i32x16 v0+64
+    v3 = load.i32x16 v0+128
+    v4 = load.i32x16 v0+192
+    v5 = load.i32x16 v0+256
+    v6 = load.i32x16 v0+320
+    v7 = load.i32x16 v0+384
+    v8 = load.i32x16 v0+448
+    v9 = load.i32x16 v0+512
+    v10 = load.i32x16 v0+576
+    v11 = load.i32x16 v0+640
+    v12 = load.i32x16 v0+704
+    v13 = load.i32x16 v0+768
+    v14 = load.i32x16 v0+832
+    v15 = load.i32x16 v0+896
+    v16 = load.i32x16 v0+960
+    v17 = load.i32x16 v0+1024
+    v18 = load.i32x16 v0+1088
+    call fn0()
+    v20 = iadd v1, v2
+    v21 = iadd v3, v4
+    v22 = iadd v5, v6
+    v23 = iadd v7, v8
+    v24 = iadd v9, v10
+    v25 = iadd v11, v12
+    v26 = iadd v13, v14
+    v27 = iadd v15, v16
+    v28 = iadd v17, v18
+    v29 = iadd v20, v21
+    v30 = iadd v22, v23
+    v31 = iadd v24, v25
+    v32 = iadd v26, v27
+    v33 = iadd v29, v30
+    v34 = iadd v31, v32
+    v35 = iadd v33, v34
+    v36 = iadd v35, v28
+    return v36
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x480, %rsp
+; block0:
+;   vmovdqu32 (%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x440(%rsp)
+;   vmovdqu32 0x40(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x400(%rsp)
+;   vmovdqu32 0x80(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x3c0(%rsp)
+;   vmovdqu32 0xc0(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x380(%rsp)
+;   vmovdqu32 0x100(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x340(%rsp)
+;   vmovdqu32 0x140(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x300(%rsp)
+;   vmovdqu32 0x180(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x2c0(%rsp)
+;   vmovdqu32 0x1c0(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x280(%rsp)
+;   vmovdqu32 0x200(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x240(%rsp)
+;   vmovdqu32 0x240(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x200(%rsp)
+;   vmovdqu32 0x280(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x1c0(%rsp)
+;   vmovdqu32 0x2c0(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x180(%rsp)
+;   vmovdqu32 0x300(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x140(%rsp)
+;   vmovdqu32 0x340(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x100(%rsp)
+;   vmovdqu32 0x380(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0xc0(%rsp)
+;   vmovdqu32 0x3c0(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x80(%rsp)
+;   vmovdqu32 0x400(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+0x40(%rsp)
+;   vmovdqu32 0x440(%rdi), %zmm0
+;   vmovdqu32 %zmm0, <offset:1>+(%rsp)
+;   load_ext_name %g+0, %rax
+;   call    *%rax
+;   vmovdqu32 <offset:1>+0x400(%rsp), %zmm0
+;   vmovdqu32 <offset:1>+0x440(%rsp), %zmm1
+;   vpaddd %zmm0, %zmm1, %zmm0
+;   vmovdqu32 <offset:1>+0x3c0(%rsp), %zmm1
+;   vmovdqu32 <offset:1>+0x380(%rsp), %zmm2
+;   vpaddd %zmm2, %zmm1, %zmm1
+;   vmovdqu32 <offset:1>+0x340(%rsp), %zmm5
+;   vmovdqu32 <offset:1>+0x300(%rsp), %zmm7
+;   vpaddd %zmm7, %zmm5, %zmm2
+;   vmovdqu32 <offset:1>+0x280(%rsp), %zmm3
+;   vmovdqu32 <offset:1>+0x2c0(%rsp), %zmm4
+;   vpaddd %zmm3, %zmm4, %zmm4
+;   vmovdqu32 <offset:1>+0x200(%rsp), %zmm3
+;   vmovdqu32 <offset:1>+0x240(%rsp), %zmm5
+;   vpaddd %zmm3, %zmm5, %zmm5
+;   vmovdqu32 <offset:1>+0x180(%rsp), %zmm3
+;   vmovdqu32 <offset:1>+0x1c0(%rsp), %zmm6
+;   vpaddd %zmm3, %zmm6, %zmm6
+;   vmovdqu32 <offset:1>+0x100(%rsp), %zmm3
+;   vmovdqu32 <offset:1>+0x140(%rsp), %zmm7
+;   vpaddd %zmm3, %zmm7, %zmm7
+;   vmovdqu32 <offset:1>+0x80(%rsp), %zmm3
+;   vmovdqu32 <offset:1>+0xc0(%rsp), %zmm30
+;   vpaddd %zmm3, %zmm30, %zmm8
+;   vmovdqu32 <offset:1>+(%rsp), %zmm3
+;   vmovdqu32 <offset:1>+0x40(%rsp), %zmm9
+;   vpaddd %zmm3, %zmm9, %zmm3
+;   vpaddd %zmm1, %zmm0, %zmm0
+;   vpaddd %zmm4, %zmm2, %zmm1
+;   vpaddd %zmm6, %zmm5, %zmm2
+;   vpaddd %zmm8, %zmm7, %zmm4
+;   vpaddd %zmm1, %zmm0, %zmm0
+;   vpaddd %zmm4, %zmm2, %zmm1
+;   vpaddd %zmm1, %zmm0, %zmm0
+;   vpaddd %zmm3, %zmm0, %zmm0
+;   addq $0x480, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+;   subq $0x480, %rsp
+; block1: ; offset 0xb
+;   vmovdqu32 (%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x440(%rsp)
+;   vmovdqu32 0x40(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x400(%rsp)
+;   vmovdqu32 0x80(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x3c0(%rsp)
+;   vmovdqu32 0xc0(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x380(%rsp)
+;   vmovdqu32 0x100(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x340(%rsp)
+;   vmovdqu32 0x140(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x300(%rsp)
+;   vmovdqu32 0x180(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x2c0(%rsp)
+;   vmovdqu32 0x1c0(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x280(%rsp)
+;   vmovdqu32 0x200(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x240(%rsp)
+;   vmovdqu32 0x240(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x200(%rsp)
+;   vmovdqu32 0x280(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x1c0(%rsp)
+;   vmovdqu32 0x2c0(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x180(%rsp)
+;   vmovdqu32 0x300(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x140(%rsp)
+;   vmovdqu32 0x340(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x100(%rsp)
+;   vmovdqu32 0x380(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0xc0(%rsp)
+;   vmovdqu32 0x3c0(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x80(%rsp)
+;   vmovdqu32 0x400(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, 0x40(%rsp)
+;   vmovdqu32 0x440(%rdi), %zmm0 ; trap: heap_oob
+;   vmovdqu32 %zmm0, (%rsp)
+;   movabsq $0, %rax ; reloc_external Abs8 %g 0
+;   callq *%rax
+;   vmovdqu32 0x400(%rsp), %zmm0
+;   vmovdqu32 0x440(%rsp), %zmm1
+;   vpaddd %zmm0, %zmm1, %zmm0
+;   vmovdqu32 0x3c0(%rsp), %zmm1
+;   vmovdqu32 0x380(%rsp), %zmm2
+;   vpaddd %zmm2, %zmm1, %zmm1
+;   vmovdqu32 0x340(%rsp), %zmm5
+;   vmovdqu32 0x300(%rsp), %zmm7
+;   vpaddd %zmm7, %zmm5, %zmm2
+;   vmovdqu32 0x280(%rsp), %zmm3
+;   vmovdqu32 0x2c0(%rsp), %zmm4
+;   vpaddd %zmm3, %zmm4, %zmm4
+;   vmovdqu32 0x200(%rsp), %zmm3
+;   vmovdqu32 0x240(%rsp), %zmm5
+;   vpaddd %zmm3, %zmm5, %zmm5
+;   vmovdqu32 0x180(%rsp), %zmm3
+;   vmovdqu32 0x1c0(%rsp), %zmm6
+;   vpaddd %zmm3, %zmm6, %zmm6
+;   vmovdqu32 0x100(%rsp), %zmm3
+;   vmovdqu32 0x140(%rsp), %zmm7
+;   vpaddd %zmm3, %zmm7, %zmm7
+;   vmovdqu32 0x80(%rsp), %zmm3
+;   vmovdqu32 0xc0(%rsp), %zmm30
+;   vpaddd %zmm3, %zmm30, %zmm8
+;   vmovdqu32 (%rsp), %zmm3
+;   vmovdqu32 0x40(%rsp), %zmm9
+;   vpaddd %zmm3, %zmm9, %zmm3
+;   vpaddd %zmm1, %zmm0, %zmm0
+;   vpaddd %zmm4, %zmm2, %zmm1
+;   vpaddd %zmm6, %zmm5, %zmm2
+;   vpaddd %zmm8, %zmm7, %zmm4
+;   vpaddd %zmm1, %zmm0, %zmm0
+;   vpaddd %zmm4, %zmm2, %zmm1
+;   vpaddd %zmm1, %zmm0, %zmm0
+;   vpaddd %zmm3, %zmm0, %zmm0
+;   addq $0x480, %rsp
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+

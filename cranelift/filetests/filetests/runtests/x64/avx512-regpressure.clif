@@ -1,7 +1,7 @@
 test run
 set opt_level=none
 set enable_simd32=true
-target x86_64 has_avx512f has_avx512vl
+target x86_64 has_avx512f has_avx512vl has_avx512bw has_avx512dq
 
 function %avx512_pressure_i32x16(i32) -> i32 {
     ss0 = explicit_slot 64

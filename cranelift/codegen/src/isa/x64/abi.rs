@@ -215,6 +215,27 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                 );
             }
 
+            // Windows x64 (fastcall) has no ABI story for 256/512-bit vector
+            // values at call boundaries in this backend:
+            //
+            // - Vector arguments are passed indirectly (see the
+            //   `ImplicitPtrArg` case below), but the indirect buffer reserved
+            //   for them is a single 16-byte slot, which a 256/512-bit store
+            //   would overflow (smashing the stack).
+            // - Win64 only preserves the low 128 bits of the callee-saved
+            //   registers xmm6-xmm15; the upper bits of ymm/zmm registers are
+            //   volatile.
+            //
+            // Reject wide vectors in fastcall signatures with a clean error
+            // instead of emitting incorrect code.
+            if param.value_type.is_vector() && param.value_type.bits() > 128 && is_fastcall {
+                return Err(crate::CodegenError::Unsupported(format!(
+                    "vector types wider than 128 bits (found {}) are not supported \
+                     in windows_fastcall signatures",
+                    param.value_type
+                )));
+            }
+
             // Windows fastcall dictates that `__m128i` and `f128` parameters to
             // a function are passed indirectly as pointers, so handle that as a
             // special case before the loop below.
@@ -348,6 +369,25 @@ impl ABIMachineSpec for X64ABIMachineSpec {
                             Use a StructReturn argument instead. (#9510)"
                                 .to_owned(),
                         ));
+                    }
+
+                    // `Inst::rc_for_type` maps 256- and 512-bit vectors onto a
+                    // single 128-bit (I8X16) register-class slot. That is fine
+                    // for register-passed values (moves operate on the full
+                    // register width for the class), but sizing a *stack* slot
+                    // from `reg_ty` would silently truncate the value to 16
+                    // bytes on both sides of the call. Until wide vectors have
+                    // a real stack-passing story, reject them with a clean
+                    // error instead of miscompiling.
+                    if param.value_type.is_vector()
+                        && param.value_type.bytes() > reg_ty.bytes()
+                    {
+                        return Err(crate::CodegenError::Unsupported(format!(
+                            "256/512-bit vector arguments or return values beyond \
+                             available vector registers are not supported \
+                             (type {} would be passed on the stack)",
+                            param.value_type
+                        )));
                     }
 
                     let size = reg_ty.bytes();
@@ -1201,6 +1241,15 @@ fn is_callee_save_fastcall(r: RealReg, enable_pinned_reg: bool) -> bool {
             R15 => !enable_pinned_reg,
             _ => false,
         },
+        // NOTE: Win64 preserves only the *low 128 bits* of xmm6-xmm15 across
+        // calls; the upper bits of the corresponding ymm/zmm registers are
+        // volatile. Treating these registers as callee-saved is therefore
+        // only correct for values up to 128 bits wide. This function has no
+        // access to the ISA flags, so instead of threading them through, the
+        // backend rejects the windows_fastcall convention entirely whenever
+        // AVX-512 (`has_avx512f`) is enabled; see `X64Backend::compile_vcode`
+        // in `isa/x64/mod.rs`. If that rejection is ever relaxed, this list
+        // must not claim xmm6-xmm15 as callee-saved for AVX-512 code.
         RegClass::Float => match r.hw_enc() {
             XMM6 | XMM7 | XMM8 | XMM9 | XMM10 | XMM11 | XMM12 | XMM13 | XMM14 | XMM15 => true,
             _ => false,
@@ -1253,6 +1302,30 @@ const fn windows_clobbers() -> PRegSet {
         .with(regs::fpr_preg(XMM3))
         .with(regs::fpr_preg(XMM4))
         .with(regs::fpr_preg(XMM5))
+        // Windows x64: xmm16-xmm31 (and the upper bits of ymm/zmm0-31) are
+        // fully volatile; only the low 128 bits of xmm6-xmm15 are
+        // callee-saved. See
+        // https://learn.microsoft.com/en-us/cpp/build/x64-calling-convention
+        // ("Callee-saved registers"). Including these in the clobber set is
+        // harmless when they are not allocatable (no `enable_simd32`): the
+        // clobber set is a mask over PRegs and regalloc only reserves the
+        // corresponding physical registers, which no vreg can use anyway.
+        .with(regs::fpr_preg(XMM16))
+        .with(regs::fpr_preg(XMM17))
+        .with(regs::fpr_preg(XMM18))
+        .with(regs::fpr_preg(XMM19))
+        .with(regs::fpr_preg(XMM20))
+        .with(regs::fpr_preg(XMM21))
+        .with(regs::fpr_preg(XMM22))
+        .with(regs::fpr_preg(XMM23))
+        .with(regs::fpr_preg(XMM24))
+        .with(regs::fpr_preg(XMM25))
+        .with(regs::fpr_preg(XMM26))
+        .with(regs::fpr_preg(XMM27))
+        .with(regs::fpr_preg(XMM28))
+        .with(regs::fpr_preg(XMM29))
+        .with(regs::fpr_preg(XMM30))
+        .with(regs::fpr_preg(XMM31))
         .with(regs::k_preg(2))
         .with(regs::k_preg(3))
         .with(regs::k_preg(4))
@@ -1291,6 +1364,28 @@ const fn sysv_clobbers() -> PRegSet {
         .with(regs::fpr_preg(XMM13))
         .with(regs::fpr_preg(XMM14))
         .with(regs::fpr_preg(XMM15))
+        // System V AMD64 ABI: *all* vector registers are caller-saved,
+        // including the AVX-512 extended registers xmm16-xmm31 (SysV ABI
+        // v1.0, section 3.2.1: "registers %xmm0-%xmm31 [...] are used to
+        // pass and return arguments" and have no callee-saved subset).
+        // Including never-allocated registers in a clobber set is harmless;
+        // see the comment in `windows_clobbers`.
+        .with(regs::fpr_preg(XMM16))
+        .with(regs::fpr_preg(XMM17))
+        .with(regs::fpr_preg(XMM18))
+        .with(regs::fpr_preg(XMM19))
+        .with(regs::fpr_preg(XMM20))
+        .with(regs::fpr_preg(XMM21))
+        .with(regs::fpr_preg(XMM22))
+        .with(regs::fpr_preg(XMM23))
+        .with(regs::fpr_preg(XMM24))
+        .with(regs::fpr_preg(XMM25))
+        .with(regs::fpr_preg(XMM26))
+        .with(regs::fpr_preg(XMM27))
+        .with(regs::fpr_preg(XMM28))
+        .with(regs::fpr_preg(XMM29))
+        .with(regs::fpr_preg(XMM30))
+        .with(regs::fpr_preg(XMM31))
         .with(regs::k_preg(2))
         .with(regs::k_preg(3))
         .with(regs::k_preg(4))
@@ -1335,6 +1430,25 @@ const fn all_clobbers() -> PRegSet {
         .with(regs::fpr_preg(XMM13))
         .with(regs::fpr_preg(XMM14))
         .with(regs::fpr_preg(XMM15))
+        // "All clobbers" must also cover the AVX-512 extended registers
+        // xmm16-xmm31; they are caller-saved in every convention we support
+        // (see comments in `sysv_clobbers` and `windows_clobbers`).
+        .with(regs::fpr_preg(XMM16))
+        .with(regs::fpr_preg(XMM17))
+        .with(regs::fpr_preg(XMM18))
+        .with(regs::fpr_preg(XMM19))
+        .with(regs::fpr_preg(XMM20))
+        .with(regs::fpr_preg(XMM21))
+        .with(regs::fpr_preg(XMM22))
+        .with(regs::fpr_preg(XMM23))
+        .with(regs::fpr_preg(XMM24))
+        .with(regs::fpr_preg(XMM25))
+        .with(regs::fpr_preg(XMM26))
+        .with(regs::fpr_preg(XMM27))
+        .with(regs::fpr_preg(XMM28))
+        .with(regs::fpr_preg(XMM29))
+        .with(regs::fpr_preg(XMM30))
+        .with(regs::fpr_preg(XMM31))
         .with(regs::k_preg(2))
         .with(regs::k_preg(3))
         .with(regs::k_preg(4))
@@ -1440,4 +1554,34 @@ const fn create_reg_env_systemv(enable_pinned_reg: bool, enable_simd32: bool) ->
     }
 
     env
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// B2 regression test: the AVX-512 extended registers xmm16-xmm31 are
+    /// caller-saved in every supported calling convention (SysV makes all
+    /// vector registers volatile; Win64 preserves only the low 128 bits of
+    /// xmm6-xmm15 and nothing at all of xmm16-xmm31), so every call clobber
+    /// set must include them. Before this was fixed, values could be kept in
+    /// zmm16-zmm31 across a `call` with no spill under `enable_simd32`.
+    #[test]
+    fn wide_xmm_registers_are_call_clobbered() {
+        for enc in 16..=31u8 {
+            let preg = regs::fpr_preg(enc);
+            assert!(
+                SYSV_CLOBBERS.contains(preg),
+                "xmm{enc} missing from SYSV_CLOBBERS"
+            );
+            assert!(
+                WINDOWS_CLOBBERS.contains(preg),
+                "xmm{enc} missing from WINDOWS_CLOBBERS"
+            );
+            assert!(
+                ALL_CLOBBERS.contains(preg),
+                "xmm{enc} missing from ALL_CLOBBERS"
+            );
+        }
+    }
 }
