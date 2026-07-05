@@ -2619,7 +2619,9 @@
 ;;     permute-lane-element := umin (16, swizzle-lane-element)
 ;; and pass a zero vector as second operand to the permute instruction.
 
-(rule 1 (lower (has_type (ty_vec128 ty) (swizzle x y)))
+;; Note: this byte-permute sequence implements CLIF swizzle semantics only
+;; for i8x16 (the wider-lane swizzle types are only lowered on x64 AVX-512).
+(rule 1 (lower (has_type ty @ $I8X16 (swizzle x y)))
       (if-let (LaneOrder.BigEndian) (lane_order))
       (vec_permute ty x (vec_imm ty 0)
          (vec_umin $I8X16 (vec_imm_splat $I8X16 16) y)))
@@ -2638,7 +2640,7 @@
 ;;     the input vector as second operand (covering lanes 16 .. 31)
 ;; to implement the required swizzle semantics.
 
-(rule (lower (has_type (ty_vec128 ty) (swizzle x y)))
+(rule (lower (has_type ty @ $I8X16 (swizzle x y)))
       (if-let (LaneOrder.LittleEndian) (lane_order))
       (vec_permute ty (vec_imm ty 0) x
          (vec_umax $I8X16 (vec_imm_splat $I8X16 239)

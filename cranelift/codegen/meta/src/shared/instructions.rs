@@ -427,24 +427,41 @@ fn define_simd_lane_access(
             .build(),
     );
 
+    // Swizzle historically operated only on `i8x16`, but the AVX-512
+    // lowerings also support it on wider-lane 512-bit integer vectors
+    // (`i32x16`, `i64x8`), so its type set additionally admits those.
+    // Types in the cross product without a backend lowering fail codegen
+    // with a clean `unsupported` error rather than verifying incorrectly.
+    let TxN_swizzle = &TypeVar::new(
+        "TxN_swizzle",
+        "An integer SIMD vector type usable by `swizzle`",
+        TypeSetBuilder::new()
+            .ints(8..64)
+            .simd_lanes(8..16)
+            .includes_scalars(false)
+            .build(),
+    );
+
     ig.push(
         Inst::new(
             "swizzle",
             r#"
         Vector swizzle.
 
-        Returns a new vector with byte-width lanes selected from the lanes of the first input
-        vector ``x`` specified in the second input vector ``s``. The indices ``i`` in range
-        ``[0, 15]`` select the ``i``-th element of ``x``. For indices outside of the range the
-        resulting lane is 0. Note that this operates on byte-width lanes.
+        Returns a new vector with lanes selected from the lanes of the first input
+        vector ``x`` specified in the second input vector ``s``. For ``i8x16``, the indices
+        ``i`` in range ``[0, 15]`` select the ``i``-th element of ``x``. For indices outside
+        of the valid lane range the resulting lane is 0. The same rule applies per lane for
+        the wider-lane vector types (e.g. for ``i32x16``, indices in ``[0, 15]`` select a
+        32-bit lane and out-of-range indices produce a zero lane).
         "#,
             &formats.binary,
         )
         .operands_in(vec![
-            Operand::new("x", I8x16).with_doc("Vector to modify by re-arranging lanes"),
-            Operand::new("y", I8x16).with_doc("Mask for re-arranging lanes"),
+            Operand::new("x", TxN_swizzle).with_doc("Vector to modify by re-arranging lanes"),
+            Operand::new("y", TxN_swizzle).with_doc("Mask for re-arranging lanes"),
         ])
-        .operands_out(vec![Operand::new("a", I8x16)]),
+        .operands_out(vec![Operand::new("a", TxN_swizzle)]),
     );
 
     ig.push(

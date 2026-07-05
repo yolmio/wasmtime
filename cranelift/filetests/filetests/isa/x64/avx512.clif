@@ -194,18 +194,5 @@ block3:
     return v14
 }
 
-;; Integer Division and Remainder for 512-bit vectors
-;; Note: AVX-512 doesn't have native integer division, so these are implemented
-;; using float conversion (with care for precision) or scalar fallback
-
-function %sdiv_i32x16(i32x16, i32x16) -> i32x16 {
-block0(v0: i32x16, v1: i32x16):
-    v2 = sdiv v0, v1
-    return v2
-}
-
-function %srem_i32x16(i32x16, i32x16) -> i32x16 {
-block0(v0: i32x16, v1: i32x16):
-    v2 = srem v0, v1
-    return v2
-}
+;; Note: 512-bit integer division/remainder (sdiv/srem/udiv/urem) is
+;; intentionally unsupported; see avx512-unsupported.clif.

@@ -1,0 +1,487 @@
+test compile precise-output
+target x86_64 has_avx512f has_avx512bw has_avx512dq has_avx512vl
+
+;; Bit-exact 512-bit bitselect / swizzle / float lane-access lowerings.
+;;
+;; - bitselect with a comparison condition locks the VPMOVD2M/Q + VPBLENDMD/Q
+;;   whole-lane blend path (valid because comparison lanes are all-ones or
+;;   all-zeros).
+;; - bitselect with an arbitrary condition locks the bitwise VPTERNLOGD/Q
+;;   (imm8=0xCA, A?B:C) path.
+;; - swizzle locks the VPCMPUD/Q + VPERMD/Q + zero-blend sequence which
+;;   implements CLIF's out-of-range-index-produces-zero semantics.
+;; - extractlane/insertlane on F32X16/F64X8 lock the XMM-only float paths
+;;   (VEXTRACTF32X4/VEXTRACTF64X2 + shuffles); no GPR may appear.
+
+;; Comparison-produced condition: whole-lane blend is legal.
+function %bitselect_i32x16_cmp(i32x16, i32x16, i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16, v2: i32x16, v3: i32x16):
+    v4 = icmp eq v0, v1
+    v5 = bitselect v4, v2, v3
+    return v5
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vpcmpd $0x0, %zmm1, %zmm0, %k7
+;   vpmovm2d %k7, %zmm0
+;   vpmovd2m %zmm0, %k7
+;   vpblendmd %zmm2, %zmm3, %zmm0 {%k7}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vpcmpeqd %zmm1, %zmm0, %k7
+;   vpmovm2d %k7, %zmm0
+;   vpmovd2m %zmm0, %k7
+;   vpblendmd %zmm2, %zmm3, %zmm0 {%k7}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+;; Arbitrary condition: must take the bitwise VPTERNLOG path.
+function %bitselect_i32x16_raw(i32x16, i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16, v2: i32x16):
+    v3 = bitselect v0, v1, v2
+    return v3
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vpternlogd $0xca, %zmm2, %zmm1, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vpternlogd $0xca, %zmm2, %zmm1, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %bitselect_i64x8_cmp(i64x8, i64x8, i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8, v2: i64x8, v3: i64x8):
+    v4 = icmp eq v0, v1
+    v5 = bitselect v4, v2, v3
+    return v5
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vpcmpq $0x0, %zmm1, %zmm0, %k7
+;   vpmovm2q %k7, %zmm0
+;   vpmovq2m %zmm0, %k7
+;   vpblendmq %zmm2, %zmm3, %zmm0 {%k7}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vpcmpeqq %zmm1, %zmm0, %k7
+;   vpmovm2q %k7, %zmm0
+;   vpmovq2m %zmm0, %k7
+;   vpblendmq %zmm2, %zmm3, %zmm0 {%k7}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %bitselect_i64x8_raw(i64x8, i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8, v2: i64x8):
+    v3 = bitselect v0, v1, v2
+    return v3
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vpternlogq $0xca, %zmm2, %zmm1, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vpternlogq $0xca, %zmm2, %zmm1, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %swizzle_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = swizzle v0, v1
+    return v2
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   movl $0x10, %esi
+;   movd %esi, %xmm5
+;   vpbroadcastd %xmm5, %zmm7
+;   vpcmpud $0x1, %zmm7, %zmm1, %k2
+;   vpermd %zmm0, %zmm1, %zmm0
+;   uninit  %xmm1
+;   vpxord %zmm1, %zmm1, %zmm1
+;   vpblendmd %zmm0, %zmm1, %zmm0 {%k2}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movl $0x10, %esi
+;   movd %esi, %xmm5
+;   vpbroadcastd %xmm5, %zmm7
+;   vpcmpltud %zmm7, %zmm1, %k2
+;   vpermd %zmm0, %zmm1, %zmm0
+;   vpxord %zmm1, %zmm1, %zmm1
+;   vpblendmd %zmm0, %zmm1, %zmm0 {%k2}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %swizzle_i64x8(i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8):
+    v2 = swizzle v0, v1
+    return v2
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   movl $0x8, %esi
+;   movq %rsi, %xmm5
+;   vpbroadcastq %xmm5, %zmm7
+;   vpcmpuq $0x1, %zmm7, %zmm1, %k2
+;   vpermq %zmm0, %zmm1, %zmm0
+;   uninit  %xmm1
+;   vpxorq %zmm1, %zmm1, %zmm1
+;   vpblendmq %zmm0, %zmm1, %zmm0 {%k2}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   movl $8, %esi
+;   movq %rsi, %xmm5
+;   vpbroadcastq %xmm5, %zmm7
+;   vpcmpltuq %zmm7, %zmm1, %k2
+;   vpermq %zmm0, %zmm1, %zmm0
+;   vpxorq %zmm1, %zmm1, %zmm1
+;   vpblendmq %zmm0, %zmm1, %zmm0 {%k2}
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %extractlane_f32x16_0(f32x16) -> f32 {
+block0(v0: f32x16):
+    v1 = extractlane v0, 0
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vextractf32x4 $0x0, %zmm0, %xmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vextractf32x4 $0, %zmm0, %xmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %extractlane_f32x16_5(f32x16) -> f32 {
+block0(v0: f32x16):
+    v1 = extractlane v0, 5
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vextractf32x4 $0x1, %zmm0, %xmm2
+;   pshufd $0x1, %xmm2, %xmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vextractf32x4 $1, %zmm0, %xmm2
+;   pshufd $1, %xmm2, %xmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %extractlane_f32x16_15(f32x16) -> f32 {
+block0(v0: f32x16):
+    v1 = extractlane v0, 15
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vextractf32x4 $0x3, %zmm0, %xmm2
+;   pshufd $0x3, %xmm2, %xmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vextractf32x4 $3, %zmm0, %xmm2
+;   pshufd $3, %xmm2, %xmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %extractlane_f64x8_0(f64x8) -> f64 {
+block0(v0: f64x8):
+    v1 = extractlane v0, 0
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vextractf64x2 $0x0, %zmm0, %xmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vextractf64x2 $0, %zmm0, %xmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %extractlane_f64x8_7(f64x8) -> f64 {
+block0(v0: f64x8):
+    v1 = extractlane v0, 7
+    return v1
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vextractf64x2 $0x3, %zmm0, %xmm2
+;   pshufd $0xee, %xmm2, %xmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vextractf64x2 $3, %zmm0, %xmm2
+;   pshufd $0xee, %xmm2, %xmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %insertlane_f32x16_0(f32x16, f32) -> f32x16 {
+block0(v0: f32x16, v1: f32):
+    v2 = insertlane v0, v1, 0
+    return v2
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vextractf32x4 $0x0, %zmm0, %xmm4
+;   movss %xmm1, %xmm4
+;   vinsertf32x4 $0x0, %xmm4, %zmm0, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vextractf32x4 $0, %zmm0, %xmm4
+;   movss %xmm1, %xmm4
+;   vinsertf32x4 $0, %xmm4, %zmm0, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %insertlane_f32x16_6(f32x16, f32) -> f32x16 {
+block0(v0: f32x16, v1: f32):
+    v2 = insertlane v0, v1, 6
+    return v2
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vextractf32x4 $0x1, %zmm0, %xmm5
+;   shufps $0x30, %xmm5, %xmm1
+;   shufps $0x84, %xmm1, %xmm5
+;   vinsertf32x4 $0x1, %xmm5, %zmm0, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vextractf32x4 $1, %zmm0, %xmm5
+;   shufps $0x30, %xmm5, %xmm1
+;   shufps $0x84, %xmm1, %xmm5
+;   vinsertf32x4 $1, %xmm5, %zmm0, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %insertlane_f32x16_15(f32x16, f32) -> f32x16 {
+block0(v0: f32x16, v1: f32):
+    v2 = insertlane v0, v1, 15
+    return v2
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vextractf32x4 $0x3, %zmm0, %xmm5
+;   shufps $0xe4, %xmm5, %xmm1
+;   shufps $0x24, %xmm1, %xmm5
+;   vinsertf32x4 $0x3, %xmm5, %zmm0, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vextractf32x4 $3, %zmm0, %xmm5
+;   shufps $0xe4, %xmm5, %xmm1
+;   shufps $0x24, %xmm1, %xmm5
+;   vinsertf32x4 $3, %xmm5, %zmm0, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %insertlane_f64x8_0(f64x8, f64) -> f64x8 {
+block0(v0: f64x8, v1: f64):
+    v2 = insertlane v0, v1, 0
+    return v2
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vextractf64x2 $0x0, %zmm0, %xmm4
+;   movsd %xmm1, %xmm4
+;   vinsertf64x2 $0x0, %xmm4, %zmm0, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vextractf64x2 $0, %zmm0, %xmm4
+;   movsd %xmm1, %xmm4
+;   vinsertf64x2 $0, %xmm4, %zmm0, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+
+function %insertlane_f64x8_7(f64x8, f64) -> f64x8 {
+block0(v0: f64x8, v1: f64):
+    v2 = insertlane v0, v1, 7
+    return v2
+}
+
+; VCode:
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block0:
+;   vextractf64x2 $0x3, %zmm0, %xmm4
+;   movlhps %xmm1, %xmm4
+;   vinsertf64x2 $0x3, %xmm4, %zmm0, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+;
+; Disassembled:
+; block0: ; offset 0x0
+;   pushq %rbp
+;   movq %rsp, %rbp
+; block1: ; offset 0x4
+;   vextractf64x2 $3, %zmm0, %xmm4
+;   movlhps %xmm1, %xmm4
+;   vinsertf64x2 $3, %xmm4, %zmm0, %zmm0
+;   movq %rbp, %rsp
+;   popq %rbp
+;   retq
+

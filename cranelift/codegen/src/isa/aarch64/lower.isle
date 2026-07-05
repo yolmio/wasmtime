@@ -245,7 +245,10 @@
 
 ;;;; Rules for `swizzle` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(rule (lower (has_type vec_i128_ty (swizzle rn rm)))
+;; TBL is a byte-table lookup, which implements CLIF swizzle semantics only
+;; for i8x16. The wider-lane swizzle types admitted by the instruction's type
+;; set (i32x16/i64x8, lowered on x64 AVX-512) must not match here.
+(rule (lower (has_type $I8X16 (swizzle rn rm)))
       (vec_tbl rn rm))
 
 ;;;; Rules for `isplit` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;

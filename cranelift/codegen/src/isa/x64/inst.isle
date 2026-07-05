@@ -1565,7 +1565,12 @@
       (if-let true (has_avx512vl))
       (x64_vmovdqu32_yl addr))
 
-(rule 0 (x64_load (multi_lane _bits _lanes) addr _ext_kind)
+;; Generic 128-bit vector fallback. This must NOT match wider vector types:
+;; a 512-bit (or 256-bit) load falling through to a 16-byte `movdqu` would
+;; silently drop the upper lanes. Constraining to `ty_vec128` means wide
+;; vector types without the matching AVX-512 feature rules above simply have
+;; no applicable rule and lowering fails with a clean unsupported-type error.
+(rule 0 (x64_load (ty_vec128 _ty) addr _ext_kind)
       (x64_movdqu_load addr))
 
 (decl x64_mov (SyntheticAmode) Reg)
@@ -5233,6 +5238,18 @@
 (decl x64_512_vpbroadcastq (RegMem) Xmm)
 (rule (x64_512_vpbroadcastq src) (x64_vpbroadcastq_z_unary src))
 
+;; Broadcast a constant 32-bit bit pattern to all 16 lanes of a ZMM register.
+;; Materializes the constant in a GPR, moves it to an XMM register, and
+;; broadcasts with VPBROADCASTD (AVX-512F only).
+(decl x64_512_splat_imm32 (u64) Xmm)
+(rule (x64_512_splat_imm32 bits)
+      (x64_512_vpbroadcastd (RegMem.Reg (x64_movd_to_xmm (imm $I32 bits)))))
+
+;; Broadcast a constant 64-bit bit pattern to all 8 lanes of a ZMM register.
+(decl x64_512_splat_imm64 (u64) Xmm)
+(rule (x64_512_splat_imm64 bits)
+      (x64_512_vpbroadcastq (RegMem.Reg (x64_movq_to_xmm (imm $I64 bits)))))
+
 ;; =============================================================================
 ;; Permute helpers (VPERMD/Q, VPERMI2D/Q)
 ;; =============================================================================
@@ -6106,6 +6123,16 @@
 (decl x64_512_vextracti64x2 (Xmm u8) Xmm)
 (rule (x64_512_vextracti64x2 src lane) (x64_vextracti64x2_ze src lane))
 
+;; VEXTRACTF32X4 - Extract 128-bit lane from 512-bit vector (as F32X4)
+;; lane: 0-3 selects which 128-bit lane to extract
+(decl x64_512_vextractf32x4 (Xmm u8) Xmm)
+(rule (x64_512_vextractf32x4 src lane) (x64_vextractf32x4_ze src lane))
+
+;; VEXTRACTF64X2 - Extract 128-bit lane from 512-bit vector (as F64X2)
+;; lane: 0-3 selects which 128-bit lane to extract (requires AVX-512DQ)
+(decl x64_512_vextractf64x2 (Xmm u8) Xmm)
+(rule (x64_512_vextractf64x2 src lane) (x64_vextractf64x2_ze src lane))
+
 ;; VEXTRACTI32X8 - Extract 256-bit lane from 512-bit vector (as I32X8)
 ;; lane: 0-1 selects which 256-bit half to extract
 (decl x64_512_vextracti32x8 (Xmm u8) Xmm)
@@ -6180,6 +6207,16 @@
 ;; lane: 0-3 selects which 128-bit lane to insert into
 (decl x64_512_vinserti64x2 (Xmm XmmMem u8) Xmm)
 (rule (x64_512_vinserti64x2 src1 src2 lane) (x64_vinserti64x2_zi src1 src2 lane))
+
+;; VINSERTF32X4 - Insert 128-bit lane into 512-bit vector (as F32X4)
+;; lane: 0-3 selects which 128-bit lane to insert into
+(decl x64_512_vinsertf32x4 (Xmm XmmMem u8) Xmm)
+(rule (x64_512_vinsertf32x4 src1 src2 lane) (x64_vinsertf32x4_zi src1 src2 lane))
+
+;; VINSERTF64X2 - Insert 128-bit lane into 512-bit vector (as F64X2)
+;; lane: 0-3 selects which 128-bit lane to insert into (requires AVX-512DQ)
+(decl x64_512_vinsertf64x2 (Xmm XmmMem u8) Xmm)
+(rule (x64_512_vinsertf64x2 src1 src2 lane) (x64_vinsertf64x2_zi src1 src2 lane))
 
 ;; VINSERTI32X8 - Insert 256-bit lane into 512-bit vector (as I32X8)
 ;; lane: 0-1 selects which 256-bit lane to insert into

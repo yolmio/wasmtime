@@ -1,0 +1,92 @@
+test compile expect-fail
+target x86_64
+
+;; 512-bit vector operations on a target WITHOUT the AVX-512 feature flags
+;; must fail to compile with a clean `CodegenError::Unsupported`.
+;;
+;; Previously the generic wildcard `multi_lane` rules in lower.isle/inst.isle
+;; would silently match these types and emit 128-bit SSE instructions (e.g.
+;; `band.i32x16` compiled to a single 16-byte `pand`, dropping the upper 384
+;; bits). Those rules are now constrained to `ty_vec128`, so 512-bit types
+;; with no AVX-512 rules available hit no lowering rule at all.
+;;
+;; See avx512-unsupported.clif for the ops that are unsupported even WITH the
+;; AVX-512 flags enabled (integer division/remainder).
+
+function %band_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = band v0, v1
+    return v2
+}
+
+function %bor_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = bor v0, v1
+    return v2
+}
+
+function %bxor_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = bxor v0, v1
+    return v2
+}
+
+function %bnot_i32x16(i32x16) -> i32x16 {
+block0(v0: i32x16):
+    v1 = bnot v0
+    return v1
+}
+
+function %band_not_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = band_not v0, v1
+    return v2
+}
+
+function %load_i32x16(i64) -> i32x16 {
+block0(v0: i64):
+    v1 = load.i32x16 v0
+    return v1
+}
+
+function %bitselect_i32x16(i32x16, i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16, v2: i32x16):
+    v3 = bitselect v0, v1, v2
+    return v3
+}
+
+function %band_i64x8(i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8):
+    v2 = band v0, v1
+    return v2
+}
+
+function %load_i64x8(i64) -> i64x8 {
+block0(v0: i64):
+    v1 = load.i64x8 v0
+    return v1
+}
+
+function %bitselect_i64x8(i64x8, i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8, v2: i64x8):
+    v3 = bitselect v0, v1, v2
+    return v3
+}
+
+function %store_i32x16(i32x16, i64) {
+block0(v0: i32x16, v1: i64):
+    store.i32x16 v0, v1
+    return
+}
+
+function %swizzle_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = swizzle v0, v1
+    return v2
+}
+
+function %vconst_i32x16() -> i32x16 {
+block0:
+    v0 = vconst.i32x16 [1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16]
+    return v0
+}

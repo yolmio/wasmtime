@@ -1,0 +1,64 @@
+test compile expect-fail
+target x86_64
+target x86_64 has_avx512f has_avx512bw has_avx512dq has_avx512vl
+
+;; 512-bit integer division and remainder are INTENTIONALLY unsupported, even
+;; with the full AVX-512 feature set enabled: AVX-512 has no vector integer
+;; divide instructions and the previous float-conversion-based lowerings were
+;; removed for being imprecise (fork commit a15bf1c95e). These must fail to
+;; compile with a clean `CodegenError::Unsupported` on both a plain x86_64
+;; target and a fully AVX-512-enabled target, rather than miscompiling.
+;;
+;; The plain-`x86_64`-only fall-through cases for ops that ARE supported with
+;; AVX-512 flags (band/load/bitselect on 512-bit types) live in
+;; avx512-unsupported-no-flags.clif, since `expect-fail` applies to every
+;; function under every target in a file and those compile fine when the
+;; AVX-512 flags are present.
+
+function %sdiv_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = sdiv v0, v1
+    return v2
+}
+
+function %srem_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = srem v0, v1
+    return v2
+}
+
+function %udiv_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = udiv v0, v1
+    return v2
+}
+
+function %urem_i32x16(i32x16, i32x16) -> i32x16 {
+block0(v0: i32x16, v1: i32x16):
+    v2 = urem v0, v1
+    return v2
+}
+
+function %sdiv_i64x8(i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8):
+    v2 = sdiv v0, v1
+    return v2
+}
+
+function %srem_i64x8(i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8):
+    v2 = srem v0, v1
+    return v2
+}
+
+function %udiv_i64x8(i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8):
+    v2 = udiv v0, v1
+    return v2
+}
+
+function %urem_i64x8(i64x8, i64x8) -> i64x8 {
+block0(v0: i64x8, v1: i64x8):
+    v2 = urem v0, v1
+    return v2
+}

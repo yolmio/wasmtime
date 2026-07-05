@@ -350,8 +350,11 @@
 (rule (sse_and $F64 x y) (x64_andpd x y))
 (rule -1 (sse_and (multi_lane _bits _lanes) x y) (x64_pand x y))
 
-(rule 6 (lower (has_type ty @ (multi_lane _bits _lanes)
-                       (band x y)))
+;; Restricted to 128-bit vectors: wider vector types (e.g. I32X16) must not
+;; fall through to a 128-bit `pand`, which would silently drop the upper
+;; lanes. Without AVX-512 rules matching, they hit no rule and lowering fails
+;; with a clean unsupported-type error.
+(rule 6 (lower (has_type ty @ (ty_vec128 _) (band x y)))
       (sse_and ty x y))
 
 ;; `i128`.
@@ -386,9 +389,11 @@
 ;; while x86 does
 ;;
 ;;   pandn(x, y) = and(not(x), y)
-(rule 8 (lower (has_type ty @ (multi_lane _bits _lane) (band x (bnot y))))
+;; 128-bit vectors only; see the `band` rule above for why wider vectors must
+;; not match here.
+(rule 8 (lower (has_type ty @ (ty_vec128 _) (band x (bnot y))))
       (sse_and_not ty y x))
-(rule 9 (lower (has_type ty @ (multi_lane _bits _lane) (band (bnot y) x)))
+(rule 9 (lower (has_type ty @ (ty_vec128 _) (band (bnot y) x)))
       (sse_and_not ty y x))
 
 (rule 10 (lower (has_type ty (band x (bnot y))))
@@ -477,8 +482,9 @@
 (rule (sse_or $F64 x y) (x64_orpd x y))
 (rule -1 (sse_or (multi_lane _bits _lanes) x y) (x64_por x y))
 
-(rule 6 (lower (has_type ty @ (multi_lane _bits _lanes)
-                       (bor x y)))
+;; 128-bit vectors only; see the `band` rule for why wider vectors must not
+;; match here.
+(rule 6 (lower (has_type ty @ (ty_vec128 _) (bor x y)))
       (sse_or ty x y))
 
 ;; `{i,b}128`.
@@ -544,7 +550,9 @@
 
 ;; SSE.
 
-(rule 6 (lower (has_type ty @ (multi_lane _bits _lanes) (bxor x y)))
+;; 128-bit vectors only; see the `band` rule for why wider vectors must not
+;; match here.
+(rule 6 (lower (has_type ty @ (ty_vec128 _) (bxor x y)))
       (x64_xor_vector ty x y))
 
 ;; `{i,b}128`.
@@ -1506,13 +1514,16 @@
       (x64_xor_vector ty x (vector_all_ones)))
 
 ;; Special case for vector-types where bit-negation is an xor against an
-;; all-one value
-(rule -1 (lower (has_type ty @ (multi_lane _bits _lanes) (bnot x)))
+;; all-one value. 128-bit vectors only: a wider vector must not fall through
+;; to a 128-bit xor that drops the upper lanes.
+(rule -1 (lower (has_type ty @ (ty_vec128 _) (bnot x)))
       (x64_xor_vector ty x (vector_all_ones)))
 
 ;;;; Rules for `bitselect` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(rule (lower (has_type ty @ (multi_lane _bits _lanes)
+;; 128-bit vectors only (SSE ops below operate on 16 bytes); 512-bit
+;; bitselect is handled in avx512.isle and must not fall through here.
+(rule (lower (has_type ty @ (ty_vec128 _)
                        (bitselect condition
                                   if_true
                                   if_false)))
@@ -1525,8 +1536,8 @@
         (sse_or ty b a)))
 
 ;; If every byte of the condition is guaranteed to be all ones or all zeroes,
-;; we can use x64_blend.
-(rule 1 (lower (has_type ty @ (multi_lane _bits _lanes)
+;; we can use x64_blend. (128-bit vectors only, as above.)
+(rule 1 (lower (has_type ty @ (ty_vec128 _)
                          (bitselect condition
                                     if_true
                                     if_false)))
@@ -4514,7 +4525,10 @@
 (rule 1 (lower (srem a @ (value_type $I8) b))
   (x64_shrq_mi (x64_checked_srem_seq8 (x64_cbtw_zo a) b) 8))
 
-(rule (lower (srem a @ (value_type ty) b))
+;; Note the `fits_in_64` gate: like `urem` above, this scalar GPR sequence
+;; must not match vector types (e.g. srem.i32x16), which would otherwise
+;; panic in `put_in_gpr` instead of failing cleanly as unsupported.
+(rule (lower (srem a @ (value_type (fits_in_64 ty)) b))
       (let (
           (a Gpr a)
           (size OperandSize (raw_operand_size_of_type ty))
@@ -4559,7 +4573,10 @@
 
 ;; Rules for `vconst` ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(rule (lower (has_type ty (vconst const)))
+;; 128-bit vectors only: wider vector constants are handled by the
+;; feature-gated AVX-512 rules in avx512.isle. Without those features the
+;; type must not fall through to a 16-byte constant load.
+(rule (lower (has_type (ty_vec128 ty) (vconst const)))
       ;; TODO use Inst::gen_constant() instead.
       (x64_xmm_load_const ty (const_to_vconst const)))
 
@@ -4722,7 +4739,11 @@
 ;; https://github.com/WebAssembly/simd/issues/93. The CLIF semantics match the
 ;; Wasm SIMD semantics for this instruction. The instruction format maps to
 ;; variables like: %dst = swizzle %src, %mask
-(rule (lower (swizzle src mask))
+;;
+;; This byte-oriented PADDUSB+PSHUFB sequence is only correct for i8x16; the
+;; wider swizzle types (i32x16/i64x8) are handled by AVX-512 rules in
+;; avx512.isle and must not fall through to a 128-bit byte shuffle.
+(rule (lower (has_type $I8X16 (swizzle src mask)))
       (let ((mask Xmm (x64_paddusb mask (emit_u128_le_const 0x70707070707070707070707070707070))))
         (lower_pshufb src mask)))
 

@@ -267,6 +267,45 @@
       (side_effect (x64_512_store_i16x32 (to_amode flags address offset) value)))
 
 ;; =============================================================================
+;; 512-bit / 256-bit vconst
+;; =============================================================================
+;; The generic vconst rule in lower.isle is restricted to 128-bit vectors, so
+;; wide vector constants are loaded here via the feature-gated x64_load rules
+;; (VMOVDQU32/64 etc. from the constant pool).
+
+(rule 17 (lower (has_type ty @ (multi_lane 64 8) (vconst const)))
+      (if-let true (has_avx512f))
+      (x64_xmm_load_const ty (const_to_vconst const)))
+
+(rule 17 (lower (has_type ty @ (multi_lane 32 16) (vconst const)))
+      (if-let true (has_avx512f))
+      (x64_xmm_load_const ty (const_to_vconst const)))
+
+(rule 17 (lower (has_type ty @ (multi_lane 16 32) (vconst const)))
+      (if-let true (has_avx512bw))
+      (x64_xmm_load_const ty (const_to_vconst const)))
+
+(rule 17 (lower (has_type ty @ (multi_lane 8 64) (vconst const)))
+      (if-let true (has_avx512bw))
+      (x64_xmm_load_const ty (const_to_vconst const)))
+
+(rule 17 (lower (has_type ty @ (multi_lane 64 4) (vconst const)))
+      (if-let true (has_avx512vl))
+      (x64_xmm_load_const ty (const_to_vconst const)))
+
+(rule 17 (lower (has_type ty @ (multi_lane 32 8) (vconst const)))
+      (if-let true (has_avx512vl))
+      (x64_xmm_load_const ty (const_to_vconst const)))
+
+(rule 17 (lower (has_type ty @ (multi_lane 16 16) (vconst const)))
+      (if-let true (has_avx512vl))
+      (x64_xmm_load_const ty (const_to_vconst const)))
+
+(rule 17 (lower (has_type ty @ (multi_lane 8 32) (vconst const)))
+      (if-let true (has_avx512vl))
+      (x64_xmm_load_const ty (const_to_vconst const)))
+
+;; =============================================================================
 ;; 256-bit Load
 ;; =============================================================================
 
@@ -843,30 +882,92 @@
 ;; =============================================================================
 ;; 512-bit Floating-Point Minimum (fmin)
 ;; =============================================================================
+;;
+;; A bare VMINPS/VMINPD does NOT implement CLIF `fmin` semantics: when either
+;; input is NaN, or when the inputs are equal-valued (which includes the
+;; +0/-0 pair), the hardware instruction simply returns the SECOND source
+;; operand. CLIF requires fmin(NaN, _) = fmin(_, NaN) = quiet NaN and
+;; fmin(+0, -0) = fmin(-0, +0) = -0.
+;;
+;; Lowering: min1 = VMIN(x, y); min2 = VMIN(y, x); or = min1 | min2 (bitwise);
+;; then blend a canonical quiet NaN into the lanes where VCMPPS/VCMPPD with
+;; the UNORD_Q predicate (imm 0x3) reports either input unordered.
+;;
+;; Per-lane case analysis:
+;;   * Neither input NaN and not a +0/-0 pair (covers ordinary values,
+;;     subnormals, +/-Inf, and bitwise-equal inputs): the minimum is uniquely
+;;     represented, so min1 == min2 bitwise and `or` is exactly that minimum.
+;;     The unordered mask is clear, so `or` is the result.
+;;   * {x, y} = {+0, -0} in either order: VMIN returns its second source, so
+;;     min1 = y and min2 = x; OR-ing +0 (all zero bits) with -0 (sign bit
+;;     only) yields -0 as required. +0/+0 and -0/-0 trivially give themselves.
+;;   * Either or both inputs NaN: `or` holds an unspecified value, but the
+;;     UNORD_Q compare flags exactly these lanes in a k-register and the
+;;     blend replaces them with the canonical quiet NaN (mantissa MSB set,
+;;     sign clear), which satisfies CLIF's NaN-propagation rules for any mix
+;;     of quiet/signaling NaN inputs.
+;;
+;; VPBLENDMD/VPBLENDMQ(k, a, b) select b where k=1 and a where k=0.
 
-;; F32X16 -> VMINPS
+;; F32X16
 (rule 17 (lower (has_type (multi_lane 32 16) (fmin x y)))
       (if-let true (has_avx512f))
-      (x64_512_vminps (put_in_xmm x) (put_in_xmm_mem y)))
+      (let ((xr Xmm (put_in_xmm x))
+            (yr Xmm (put_in_xmm y))
+            (min1 Xmm (x64_512_vminps xr yr))
+            (min2 Xmm (x64_512_vminps yr xr))
+            (min_or Xmm (x64_512_vpord min1 min2))
+            (k_nan Reg (x64_512_vcmpps xr yr 0x3)) ;; UNORD_Q
+            (qnan Xmm (x64_512_splat_imm32 0x7FC00000)))
+        (x64_512_vpblendmd k_nan min_or qnan)))
 
-;; F64X8 -> VMINPD
+;; F64X8 (canonical quiet NaN is 0x7FF8000000000000)
 (rule 17 (lower (has_type (multi_lane 64 8) (fmin x y)))
       (if-let true (has_avx512f))
-      (x64_512_vminpd (put_in_xmm x) (put_in_xmm_mem y)))
+      (let ((xr Xmm (put_in_xmm x))
+            (yr Xmm (put_in_xmm y))
+            (min1 Xmm (x64_512_vminpd xr yr))
+            (min2 Xmm (x64_512_vminpd yr xr))
+            (min_or Xmm (x64_512_vporq min1 min2))
+            (k_nan Reg (x64_512_vcmppd xr yr 0x3)) ;; UNORD_Q
+            (qnan Xmm (x64_512_splat_imm64 0x7FF8000000000000)))
+        (x64_512_vpblendmq k_nan min_or qnan)))
 
 ;; =============================================================================
 ;; 512-bit Floating-Point Maximum (fmax)
 ;; =============================================================================
+;;
+;; Dual of the fmin lowering above; see the case analysis there. The only
+;; difference: the two native VMAX results are combined with bitwise AND
+;; instead of OR, so that for the +0/-0 pair (where max1 = y and max2 = x,
+;; one of them +0 = all-zero bits) the AND clears the sign bit and produces
+;; +0, as CLIF requires (fmax(-0, +0) = fmax(+0, -0) = +0). For all other
+;; non-NaN cases max1 == max2 bitwise, so the AND is the identity. NaN lanes
+;; are again overridden with a canonical quiet NaN via the UNORD_Q k-mask.
 
-;; F32X16 -> VMAXPS
+;; F32X16
 (rule 17 (lower (has_type (multi_lane 32 16) (fmax x y)))
       (if-let true (has_avx512f))
-      (x64_512_vmaxps (put_in_xmm x) (put_in_xmm_mem y)))
+      (let ((xr Xmm (put_in_xmm x))
+            (yr Xmm (put_in_xmm y))
+            (max1 Xmm (x64_512_vmaxps xr yr))
+            (max2 Xmm (x64_512_vmaxps yr xr))
+            (max_and Xmm (x64_512_vpandd max1 max2))
+            (k_nan Reg (x64_512_vcmpps xr yr 0x3)) ;; UNORD_Q
+            (qnan Xmm (x64_512_splat_imm32 0x7FC00000)))
+        (x64_512_vpblendmd k_nan max_and qnan)))
 
-;; F64X8 -> VMAXPD
+;; F64X8
 (rule 17 (lower (has_type (multi_lane 64 8) (fmax x y)))
       (if-let true (has_avx512f))
-      (x64_512_vmaxpd (put_in_xmm x) (put_in_xmm_mem y)))
+      (let ((xr Xmm (put_in_xmm x))
+            (yr Xmm (put_in_xmm y))
+            (max1 Xmm (x64_512_vmaxpd xr yr))
+            (max2 Xmm (x64_512_vmaxpd yr xr))
+            (max_and Xmm (x64_512_vpandq max1 max2))
+            (k_nan Reg (x64_512_vcmppd xr yr 0x3)) ;; UNORD_Q
+            (qnan Xmm (x64_512_splat_imm64 0x7FF8000000000000)))
+        (x64_512_vpblendmq k_nan max_and qnan)))
 
 ;; =============================================================================
 ;; 512-bit Floating-Point Square Root (sqrt)
@@ -932,17 +1033,31 @@
 ;; 512-bit Permutation / Swizzle (VPERMD/Q)
 ;; =============================================================================
 
-;; I32X16 swizzle -> VPERMD
-;; swizzle(data, indices) = data[indices[i]] for each lane i
+;; I32X16 swizzle -> VPCMPUD + VPERMD + VPBLENDMD
+;; swizzle(data, indices) = data[indices[i]] for each lane i, with CLIF
+;; semantics requiring lanes with an out-of-range index (unsigned >= lane
+;; count) to produce 0. Raw VPERMD wraps indices modulo the lane count, so we
+;; additionally compute a validity k-mask k = (indices <u lane_count) with
+;; VPCMPUD and blend the permuted result against zero. (The assembler DSL has
+;; no zero-masked VPERMD form, so VPBLENDMD against a zero vector is used to
+;; apply the mask instead.)
 (rule 17 (lower (has_type (multi_lane 32 16) (swizzle data indices)))
       (if-let true (has_avx512f))
-      (x64_512_vpermd (put_in_xmm indices) (put_in_xmm_mem data)))
+      (let ((idx Xmm (put_in_xmm indices))
+            (limit Xmm (x64_512_vpbroadcastd (x64_movd_to_xmm (imm $I32 16))))
+            (valid Reg (x64_512_vpcmpultd idx limit))
+            (permuted Xmm (x64_512_vpermd idx (put_in_xmm_mem data))))
+        (x64_512_vpblendmd valid (x64_512_zmm_zero_d) permuted)))
 
-;; I64X8 swizzle -> VPERMQ
-;; swizzle(data, indices) = data[indices[i]] for each lane i
+;; I64X8 swizzle -> VPCMPUQ + VPERMQ + VPBLENDMQ
+;; Same out-of-range handling as the I32X16 rule above (index >= 8 -> 0).
 (rule 17 (lower (has_type (multi_lane 64 8) (swizzle data indices)))
       (if-let true (has_avx512f))
-      (x64_512_vpermq (put_in_xmm indices) (put_in_xmm_mem data)))
+      (let ((idx Xmm (put_in_xmm indices))
+            (limit Xmm (x64_512_vpbroadcastq (x64_movq_to_xmm (imm $I64 8))))
+            (valid Reg (x64_512_vpcmpultq idx limit))
+            (permuted Xmm (x64_512_vpermq idx (put_in_xmm_mem data))))
+        (x64_512_vpblendmq valid (x64_512_zmm_zero_q) permuted)))
 
 ;; =============================================================================
 ;; 512-bit Uniform Shift (VPSLLD/Q, VPSRLD/Q, VPSRAD/Q)
@@ -1022,18 +1137,54 @@
 ;; Note: The blend helper parameter names are inverted from actual behavior.
 ;; VPBLENDMD selects src2 when k=1, src1 when k=0.
 ;; So we pass (if_false, if_true) to get correct bitselect semantics.
+;;
+;; CLIF `bitselect` is BITWISE: result = (cond & if_true) | (~cond & if_false).
+;; VPMOVD2M only samples the sign bit of each lane, so this whole-lane blend is
+;; only correct when every condition lane is known to be all-ones or all-zeros
+;; (e.g. it is the result of a vector comparison). Gate on the same
+;; `all_ones_or_all_zeros` extractor the 128-bit blend specialization uses
+;; (defined in lower.isle; all x64 .isle files compile as one unit).
 (rule 17 (lower (has_type (multi_lane 32 16) (bitselect cond if_true if_false)))
       (if-let true (has_avx512f))
+      (if (all_ones_or_all_zeros cond))
       (x64_512_vpblendmd (x64_512_vec_mask_to_kreg_32 (put_in_xmm cond))
                        (put_in_xmm if_false)
                        (put_in_xmm_mem if_true)))
 
 ;; I64X8 bitselect -> VPMOVQ2M + VPBLENDMQ
+;; Same lane-mask precondition as the I32X16 rule above.
 (rule 17 (lower (has_type (multi_lane 64 8) (bitselect cond if_true if_false)))
       (if-let true (has_avx512f))
+      (if (all_ones_or_all_zeros cond))
       (x64_512_vpblendmq (x64_512_vec_mask_to_kreg_64 (put_in_xmm cond))
                        (put_in_xmm if_false)
                        (put_in_xmm_mem if_true)))
+
+;; General bitwise bitselect for 512-bit vectors with 32/64-bit lanes
+;; (covers I32X16/F32X16 and I64X8/F64X8; `bitselect` is a pure bitwise
+;; operation so the float/int distinction is irrelevant here).
+;;
+;; VPTERNLOGD/Q with imm8=0xCA computes the ternary function A ? B : C
+;; bitwise, where A is the first (read-write) operand. The x64_512_vpternlog*
+;; constructors wrap the DSL-generated RMW instruction (first operand tied),
+;; the same idiom used by `x64_512_all_ones_32`.
+;;
+;; Lower priority (16) than the comparison-gated VPBLENDM rules (17) and the
+;; masked-fusion rules (18), so this is the fallback for arbitrary bit-pattern
+;; conditions (e.g. partial-lane masks like 0x0000FFFF).
+(rule 16 (lower (has_type (multi_lane 32 16) (bitselect cond if_true if_false)))
+      (if-let true (has_avx512f))
+      (x64_512_vpternlogd (put_in_xmm cond)
+                          (put_in_xmm if_true)
+                          (put_in_xmm_mem if_false)
+                          0xCA))
+
+(rule 16 (lower (has_type (multi_lane 64 8) (bitselect cond if_true if_false)))
+      (if-let true (has_avx512f))
+      (x64_512_vpternlogq (put_in_xmm cond)
+                          (put_in_xmm if_true)
+                          (put_in_xmm_mem if_false)
+                          0xCA))
 
 ;; I16X32 bitselect -> VPANDD/VPORD (bitwise)
 (rule 17 (lower (has_type (multi_lane 16 32) (bitselect cond if_true if_false)))
@@ -1144,13 +1295,43 @@
       (if-let true (has_avx512dq))
       (x64_512_vcvtqq2pd (put_in_xmm_mem x)))
 
-;; fcvt_to_sint_sat F64X8 -> I64X8 (VCVTTPD2QQ with truncation toward zero)
-;; Note: AVX-512 VCVTTPD2QQ automatically saturates to I64 range, so we use
-;; the truncating version for fcvt_to_sint_sat.
+;; fcvt_to_sint_sat F64X8 -> I64X8
+;;
+;; A bare VCVTTPD2QQ does NOT implement CLIF `fcvt_to_sint_sat`: for NaN and
+;; for ALL out-of-range inputs (including large positive ones) it produces
+;; the "integer indefinite" value 0x8000000000000000 (i64::MIN). CLIF
+;; requires NaN -> 0, negative overflow -> i64::MIN, positive overflow ->
+;; i64::MAX.
+;;
+;; Per-lane case analysis (cvt = VCVTTPD2QQ(x)):
+;;   * NaN: cvt = i64::MIN (wrong). VCMPPD(x, x, UNORD_Q = 0x3) flags the
+;;     lane and we blend in zero. NaN also fails the GE_OQ compare below
+;;     (unordered => false), so the lane stays 0.
+;;   * x >= 2^63 (0x43E0000000000000; note i64::MAX = 2^63 - 1 is NOT
+;;     representable as f64 -- the largest f64 below 2^63 is
+;;     9223372036854774784.0 = 2^63 - 1024, which converts in range):
+;;     cvt = i64::MIN (wrong). VCMPPD(x, splat(2^63), GE_OQ = 0x1D) flags
+;;     the lane and we blend in i64::MAX. +Inf takes this path too.
+;;   * -2^63 <= x < 2^63: in range; cvt is the correctly truncated value
+;;     (truncation toward zero) and neither fixup fires. -2^63 itself is
+;;     exactly representable and converts to i64::MIN.
+;;   * x < -2^63 (e.g. -9223372036854777856.0, the next f64 below -2^63) or
+;;     -Inf: cvt = 0x8000000000000000 = i64::MIN, which is exactly the
+;;     required negative saturation; neither fixup fires.
 (rule 17 (lower (has_type (multi_lane 64 8)
                           (fcvt_to_sint_sat x @ (value_type (multi_lane 64 8)))))
       (if-let true (has_avx512dq))
-      (x64_512_vcvttpd2qq (put_in_xmm_mem x)))
+      (let ((src Xmm (put_in_xmm x))
+            (cvt Xmm (x64_512_vcvttpd2qq src))
+            ;; NaN lanes -> 0.
+            (k_nan Reg (x64_512_vcmppd src src 0x3)) ;; UNORD_Q
+            (zero Xmm (x64_512_zmm_zero_d))
+            (cvt_nz Xmm (x64_512_vpblendmq k_nan cvt zero))
+            ;; Positive-overflow lanes (x >= 2^63, incl. +Inf) -> i64::MAX.
+            (bound Xmm (x64_512_splat_imm64 0x43E0000000000000)) ;; 2^63 as f64
+            (k_ovf Reg (x64_512_vcmppd src bound 0x1D)) ;; GE_OQ
+            (imax Xmm (x64_512_splat_imm64 0x7FFFFFFFFFFFFFFF)))
+        (x64_512_vpblendmq k_ovf cvt_nz imax)))
 
 ;; fcvt_from_sint I32X16 -> F32X16 (VCVTDQ2PS)
 (rule 17 (lower (has_type (multi_lane 32 16)
@@ -1158,11 +1339,43 @@
       (if-let true (has_avx512f))
       (x64_512_vcvtdq2ps (put_in_xmm_mem x)))
 
-;; fcvt_to_sint_sat F32X16 -> I32X16 (VCVTTPS2DQ with truncation toward zero)
+;; fcvt_to_sint_sat F32X16 -> I32X16
+;;
+;; A bare VCVTTPS2DQ does NOT implement CLIF `fcvt_to_sint_sat`: for NaN and
+;; for ALL out-of-range inputs (including large positive ones) it produces
+;; the "integer indefinite" value 0x80000000 (i32::MIN). CLIF requires
+;; NaN -> 0, negative overflow -> i32::MIN, positive overflow -> i32::MAX.
+;;
+;; Per-lane case analysis (cvt = VCVTTPS2DQ(x)):
+;;   * NaN: cvt = i32::MIN (wrong). VCMPPS(x, x, UNORD_Q = 0x3) flags the
+;;     lane and we blend in zero. NaN also fails the GE_OQ compare below
+;;     (unordered => false), so the lane stays 0.
+;;   * x >= 2^31 (2147483648.0, exactly representable; note i32::MAX =
+;;     2147483647 is NOT representable as f32 -- the largest f32 below 2^31
+;;     is 2147483520.0, which converts in range): cvt = i32::MIN (wrong).
+;;     VCMPPS(x, splat(2^31 = 0x4F000000), GE_OQ = 0x1D) flags the lane and
+;;     we blend in i32::MAX. +Inf takes this path too.
+;;   * -2^31 <= x < 2^31: in range; cvt is the correctly truncated value
+;;     (truncation toward zero, so 0.5 -> 0 and -0.5 -> 0) and neither fixup
+;;     fires. -2^31 itself is exactly representable and converts to
+;;     i32::MIN.
+;;   * x < -2^31 (e.g. -2147483904.0, the next f32 below -2^31) or -Inf:
+;;     cvt = 0x80000000 = i32::MIN, which is exactly the required negative
+;;     saturation; neither fixup fires.
 (rule 17 (lower (has_type (multi_lane 32 16)
                           (fcvt_to_sint_sat x @ (value_type (multi_lane 32 16)))))
       (if-let true (has_avx512f))
-      (x64_512_vcvttps2dq (put_in_xmm_mem x)))
+      (let ((src Xmm (put_in_xmm x))
+            (cvt Xmm (x64_512_vcvttps2dq src))
+            ;; NaN lanes -> 0.
+            (k_nan Reg (x64_512_vcmpps src src 0x3)) ;; UNORD_Q
+            (zero Xmm (x64_512_zmm_zero_d))
+            (cvt_nz Xmm (x64_512_vpblendmd k_nan cvt zero))
+            ;; Positive-overflow lanes (x >= 2^31, incl. +Inf) -> i32::MAX.
+            (bound Xmm (x64_512_splat_imm32 0x4F000000)) ;; 2^31 as f32
+            (k_ovf Reg (x64_512_vcmpps src bound 0x1D)) ;; GE_OQ
+            (imax Xmm (x64_512_splat_imm32 0x7FFFFFFF)))
+        (x64_512_vpblendmd k_ovf cvt_nz imax)))
 
 ;; =============================================================================
 ;; Masked Operation Fusion Patterns
@@ -1179,6 +1392,10 @@
 (rule 18 (lower (has_type (multi_lane 32 16)
                           (bitselect mask (iadd x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpaddd (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
@@ -1188,6 +1405,10 @@
 (rule 18 (lower (has_type (multi_lane 32 16)
                           (bitselect mask (isub x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpsubd (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
@@ -1197,6 +1418,10 @@
 (rule 18 (lower (has_type (multi_lane 32 16)
                           (bitselect mask (imul x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpmulld (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
                             (put_in_xmm x)
                             (put_in_xmm_mem y)
@@ -1206,6 +1431,10 @@
 (rule 18 (lower (has_type (multi_lane 32 16)
                           (bitselect mask (band x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpandd (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
@@ -1215,6 +1444,10 @@
 (rule 18 (lower (has_type (multi_lane 32 16)
                           (bitselect mask (bor x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpord (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
                           (put_in_xmm x)
                           (put_in_xmm_mem y)
@@ -1224,6 +1457,10 @@
 (rule 18 (lower (has_type (multi_lane 32 16)
                           (bitselect mask (bxor x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpxord (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
@@ -1233,6 +1470,10 @@
 (rule 18 (lower (has_type (multi_lane 32 16)
                           (bitselect mask (smin x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpminsd (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
                             (put_in_xmm x)
                             (put_in_xmm_mem y)
@@ -1242,6 +1483,10 @@
 (rule 18 (lower (has_type (multi_lane 32 16)
                           (bitselect mask (smax x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpmaxsd (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
                             (put_in_xmm x)
                             (put_in_xmm_mem y)
@@ -1255,6 +1500,10 @@
 (rule 18 (lower (has_type (multi_lane 64 8)
                           (bitselect mask (iadd x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpaddq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
@@ -1264,6 +1513,10 @@
 (rule 18 (lower (has_type (multi_lane 64 8)
                           (bitselect mask (isub x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpsubq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
@@ -1273,6 +1526,10 @@
 (rule 18 (lower (has_type (multi_lane 64 8)
                           (bitselect mask (imul x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (if-let true (has_avx512dq))
       (x64_512_masked_vpmullq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
                             (put_in_xmm x)
@@ -1283,6 +1540,10 @@
 (rule 18 (lower (has_type (multi_lane 64 8)
                           (bitselect mask (band x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpandq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
@@ -1292,6 +1553,10 @@
 (rule 18 (lower (has_type (multi_lane 64 8)
                           (bitselect mask (bor x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vporq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
                           (put_in_xmm x)
                           (put_in_xmm_mem y)
@@ -1301,6 +1566,10 @@
 (rule 18 (lower (has_type (multi_lane 64 8)
                           (bitselect mask (bxor x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpxorq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
@@ -1310,6 +1579,10 @@
 (rule 18 (lower (has_type (multi_lane 64 8)
                           (bitselect mask (smin x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpminsq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
                             (put_in_xmm x)
                             (put_in_xmm_mem y)
@@ -1319,6 +1592,10 @@
 (rule 18 (lower (has_type (multi_lane 64 8)
                           (bitselect mask (smax x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpmaxsq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
                             (put_in_xmm x)
                             (put_in_xmm_mem y)
@@ -1328,6 +1605,10 @@
 (rule 18 (lower (has_type (multi_lane 32 16)
                           (bitselect mask (umin x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpminud (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
                             (put_in_xmm x)
                             (put_in_xmm_mem y)
@@ -1337,6 +1618,10 @@
 (rule 18 (lower (has_type (multi_lane 32 16)
                           (bitselect mask (umax x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpmaxud (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
                             (put_in_xmm x)
                             (put_in_xmm_mem y)
@@ -1346,6 +1631,10 @@
 (rule 18 (lower (has_type (multi_lane 64 8)
                           (bitselect mask (umin x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpminuq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
                             (put_in_xmm x)
                             (put_in_xmm_mem y)
@@ -1355,6 +1644,10 @@
 (rule 18 (lower (has_type (multi_lane 64 8)
                           (bitselect mask (umax x y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vpmaxuq (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
                             (put_in_xmm x)
                             (put_in_xmm_mem y)
@@ -1368,6 +1661,10 @@
 (rule 18 (lower (has_type (multi_lane 32 16)
                           (bitselect mask (fadd x @ (value_type (multi_lane 32 16)) y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vaddps (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
@@ -1377,6 +1674,10 @@
 (rule 18 (lower (has_type (multi_lane 32 16)
                           (bitselect mask (fsub x @ (value_type (multi_lane 32 16)) y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vsubps (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
@@ -1386,6 +1687,10 @@
 (rule 18 (lower (has_type (multi_lane 32 16)
                           (bitselect mask (fmul x @ (value_type (multi_lane 32 16)) y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vmulps (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
@@ -1395,28 +1700,18 @@
 (rule 18 (lower (has_type (multi_lane 32 16)
                           (bitselect mask (fdiv x @ (value_type (multi_lane 32 16)) y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vdivps (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
                            (put_in_xmm passthru)))
 
-;; bitselect(mask, fmin(x, y), passthru) -> masked VMINPS
-(rule 18 (lower (has_type (multi_lane 32 16)
-                          (bitselect mask (fmin x @ (value_type (multi_lane 32 16)) y) passthru)))
-      (if-let true (has_avx512f))
-      (x64_512_masked_vminps (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
-                           (put_in_xmm x)
-                           (put_in_xmm_mem y)
-                           (put_in_xmm passthru)))
-
-;; bitselect(mask, fmax(x, y), passthru) -> masked VMAXPS
-(rule 18 (lower (has_type (multi_lane 32 16)
-                          (bitselect mask (fmax x @ (value_type (multi_lane 32 16)) y) passthru)))
-      (if-let true (has_avx512f))
-      (x64_512_masked_vmaxps (x64_512_vec_mask_to_kreg_32 (put_in_xmm mask))
-                           (put_in_xmm x)
-                           (put_in_xmm_mem y)
-                           (put_in_xmm passthru)))
+;; NOTE: the fmin/fmax fusion rules were removed: a bare masked VMINPS/VMAXPS
+;; does not implement CLIF fmin/fmax NaN/signed-zero semantics; the unfused
+;; fmin/fmax + bitselect lowerings cover this pattern correctly.
 
 ;; -----------------------------------------------------------------------------
 ;; F64X8 (double-precision) Masked Arithmetic Fusion
@@ -1426,6 +1721,10 @@
 (rule 18 (lower (has_type (multi_lane 64 8)
                           (bitselect mask (fadd x @ (value_type (multi_lane 64 8)) y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vaddpd (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
@@ -1435,6 +1734,10 @@
 (rule 18 (lower (has_type (multi_lane 64 8)
                           (bitselect mask (fsub x @ (value_type (multi_lane 64 8)) y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vsubpd (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
@@ -1444,6 +1747,10 @@
 (rule 18 (lower (has_type (multi_lane 64 8)
                           (bitselect mask (fmul x @ (value_type (multi_lane 64 8)) y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vmulpd (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
@@ -1453,28 +1760,18 @@
 (rule 18 (lower (has_type (multi_lane 64 8)
                           (bitselect mask (fdiv x @ (value_type (multi_lane 64 8)) y) passthru)))
       (if-let true (has_avx512f))
+      ;; Free-variable condition: the whole-lane masked instruction is only
+      ;; equivalent to bitwise `bitselect` when each mask lane is all-ones
+      ;; or all-zeros, so require proof of that.
+      (if (all_ones_or_all_zeros mask))
       (x64_512_masked_vdivpd (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
                            (put_in_xmm x)
                            (put_in_xmm_mem y)
                            (put_in_xmm passthru)))
 
-;; bitselect(mask, fmin(x, y), passthru) -> masked VMINPD
-(rule 18 (lower (has_type (multi_lane 64 8)
-                          (bitselect mask (fmin x @ (value_type (multi_lane 64 8)) y) passthru)))
-      (if-let true (has_avx512f))
-      (x64_512_masked_vminpd (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
-                           (put_in_xmm x)
-                           (put_in_xmm_mem y)
-                           (put_in_xmm passthru)))
-
-;; bitselect(mask, fmax(x, y), passthru) -> masked VMAXPD
-(rule 18 (lower (has_type (multi_lane 64 8)
-                          (bitselect mask (fmax x @ (value_type (multi_lane 64 8)) y) passthru)))
-      (if-let true (has_avx512f))
-      (x64_512_masked_vmaxpd (x64_512_vec_mask_to_kreg_64 (put_in_xmm mask))
-                           (put_in_xmm x)
-                           (put_in_xmm_mem y)
-                           (put_in_xmm passthru)))
+;; NOTE: the fmin/fmax fusion rules were removed: a bare masked VMINPD/VMAXPD
+;; does not implement CLIF fmin/fmax NaN/signed-zero semantics; the unfused
+;; fmin/fmax + bitselect lowerings cover this pattern correctly.
 
 ;; =============================================================================
 ;; Bitcast for 512-bit vector types
@@ -1652,6 +1949,15 @@
 ;; 1. Extract the 128-bit chunk containing the target element
 ;; 2. Use scalar PEXTRD/Q or PINSRD/Q on that chunk
 ;; 3. For insert, reinsert the modified chunk back into the 512-bit vector
+;;
+;; REGISTER-CLASS SAFETY: the integer rules below intentionally match the
+;; concrete types $I32X16/$I64X8 (NOT `(multi_lane 32 16)`/`(multi_lane 64 8)`,
+;; which would also match F32X16/F64X8). PEXTRD/Q and PINSRD/Q move through
+;; general-purpose registers; letting a float-typed vector reach them aliases
+;; a Float-class vreg to an Int-class vreg and trips a regalloc2 assertion.
+;; Matching on the concrete int types makes that class mismatch structurally
+;; impossible; F32X16/F64X8 are handled by the dedicated XMM-only float rules
+;; further below (VEXTRACTF32X4/VEXTRACTF64X2 + in-XMM shuffles).
 
 ;; -----------------------------------------------------------------------------
 ;; I32X16 extractlane - Extract single i32 from 512-bit vector
@@ -1659,70 +1965,70 @@
 ;; -----------------------------------------------------------------------------
 
 ;; I32X16 extractlane lanes 0-3 (chunk 0)
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 0)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 0)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 0) 0))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 1)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 1)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 0) 1))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 2)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 2)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 0) 2))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 3)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 3)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 0) 3))
 
 ;; I32X16 extractlane lanes 4-7 (chunk 1)
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 4)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 4)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 1) 0))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 5)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 5)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 1) 1))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 6)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 6)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 1) 2))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 7)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 7)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 1) 3))
 
 ;; I32X16 extractlane lanes 8-11 (chunk 2)
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 8)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 8)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 2) 0))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 9)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 9)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 2) 1))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 10)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 10)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 2) 2))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 11)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 11)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 2) 3))
 
 ;; I32X16 extractlane lanes 12-15 (chunk 3)
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 12)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 12)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 3) 0))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 13)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 13)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 3) 1))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 14)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 14)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 3) 2))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 15)))
+(rule 17 (lower (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 15)))
       (if-let true (has_avx512f))
       (x64_pextrd (x64_512_vextracti32x4 (put_in_xmm vec) 3) 3))
 
@@ -1733,48 +2039,90 @@
 
 ;; I64X8 extractlane lanes 0-1 (chunk 0)
 ;; Note: vextracti64x2 requires AVX-512DQ
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 0)))
+(rule 17 (lower (extractlane vec @ (value_type $I64X8) (u8_from_uimm8 0)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 0) 0))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 1)))
+(rule 17 (lower (extractlane vec @ (value_type $I64X8) (u8_from_uimm8 1)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 0) 1))
 
 ;; I64X8 extractlane lanes 2-3 (chunk 1)
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 2)))
+(rule 17 (lower (extractlane vec @ (value_type $I64X8) (u8_from_uimm8 2)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 1) 0))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 3)))
+(rule 17 (lower (extractlane vec @ (value_type $I64X8) (u8_from_uimm8 3)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 1) 1))
 
 ;; I64X8 extractlane lanes 4-5 (chunk 2)
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 4)))
+(rule 17 (lower (extractlane vec @ (value_type $I64X8) (u8_from_uimm8 4)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 2) 0))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 5)))
+(rule 17 (lower (extractlane vec @ (value_type $I64X8) (u8_from_uimm8 5)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 2) 1))
 
 ;; I64X8 extractlane lanes 6-7 (chunk 3)
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 6)))
+(rule 17 (lower (extractlane vec @ (value_type $I64X8) (u8_from_uimm8 6)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 3) 0))
 
-(rule 17 (lower (extractlane vec @ (value_type (multi_lane 64 8)) (u8_from_uimm8 7)))
+(rule 17 (lower (extractlane vec @ (value_type $I64X8) (u8_from_uimm8 7)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (x64_pextrq (x64_512_vextracti64x2 (put_in_xmm vec) 3) 1))
+
+;; -----------------------------------------------------------------------------
+;; F32X16 / F64X8 extractlane - float lanes stay entirely in XMM registers
+;; -----------------------------------------------------------------------------
+;; Extract the 128-bit chunk holding the lane with VEXTRACTF32X4/VEXTRACTF64X2,
+;; then move the wanted lane to position 0 within the chunk using the same
+;; shuffles the 128-bit f32x4/f64x2 extractlane lowerings use (see lower.isle).
+;; The scalar float result reads only the low lane of the XMM; no GPR is ever
+;; involved, so there is no Float/Int register-class aliasing.
+
+;; F32X16 extractlane, lane % 4 == 0: the extracted chunk already has the
+;; wanted value in lane 0. Higher priority (18) than the shuffling rule.
+(rule 18 (lower (extractlane vec @ (value_type $F32X16) (u8_from_uimm8 lane)))
+      (if-let true (has_avx512f))
+      (if-let 0 (u8_and lane 3))
+      (x64_512_vextractf32x4 (put_in_xmm vec) (u8_wrapping_shr lane 2)))
+
+;; F32X16 extractlane, lane % 4 != 0: PSHUFD the wanted lane into position 0
+;; (same idiom as the 128-bit `f32x4.extract_lane N` lowering).
+(rule 17 (lower (extractlane vec @ (value_type $F32X16) (u8_from_uimm8 lane)))
+      (if-let true (has_avx512f))
+      (x64_pshufd (x64_512_vextractf32x4 (put_in_xmm vec) (u8_wrapping_shr lane 2))
+                  (u8_and lane 3)))
+
+;; F64X8 extractlane, even lane: the extracted chunk already has the wanted
+;; value in lane 0.
+;; Note: VEXTRACTF64X2 requires AVX-512DQ; the backend guarantees F implies
+;; BW+DQ+VL at ISA construction (enforced since commit c5f6a55176), but keep
+;; the explicit DQ gate for consistency with the I64X8 rules above.
+(rule 18 (lower (extractlane vec @ (value_type $F64X8) (u8_from_uimm8 lane)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (if-let 0 (u8_and lane 1))
+      (x64_512_vextractf64x2 (put_in_xmm vec) (u8_wrapping_shr lane 1)))
+
+;; F64X8 extractlane, odd lane: move the upper half of the chunk down (same
+;; idiom as the 128-bit `f64x2.extract_lane 1` lowering).
+(rule 17 (lower (extractlane vec @ (value_type $F64X8) (u8_from_uimm8 lane)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (x64_pshufd (x64_512_vextractf64x2 (put_in_xmm vec) (u8_wrapping_shr lane 1))
+                  0b11_10_11_10))
 
 ;; -----------------------------------------------------------------------------
 ;; I32X16 store(extractlane) - Optimized store of extracted i32 from 512-bit vector
@@ -1785,28 +2133,28 @@
 ;; I32X16 store extractlane lanes 0-3 (chunk 0)
 ;; Priority 18 to override the generic store(extractlane) rules in lower.isle
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 0)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 0)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
       (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 0) 0)))
 
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 1)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 1)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
       (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 0) 1)))
 
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 2)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 2)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
       (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 0) 2)))
 
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 3)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 3)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
@@ -1814,28 +2162,28 @@
 
 ;; I32X16 store extractlane lanes 4-7 (chunk 1)
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 4)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 4)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
       (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 1) 0)))
 
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 5)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 5)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
       (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 1) 1)))
 
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 6)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 6)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
       (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 1) 2)))
 
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 7)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 7)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
@@ -1843,28 +2191,28 @@
 
 ;; I32X16 store extractlane lanes 8-11 (chunk 2)
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 8)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 8)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
       (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 2) 0)))
 
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 9)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 9)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
       (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 2) 1)))
 
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 10)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 10)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
       (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 2) 2)))
 
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 11)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 11)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
@@ -1872,28 +2220,28 @@
 
 ;; I32X16 store extractlane lanes 12-15 (chunk 3)
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 12)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 12)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
       (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 3) 0)))
 
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 13)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 13)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
       (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 3) 1)))
 
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 14)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 14)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
       (side_effect (x64_pextrd_store (to_amode flags address offset) (x64_512_vextracti32x4 (put_in_xmm vec) 3) 2)))
 
 (rule 18 (lower (store (little_or_native_endian flags)
-                      (has_type $I32 (extractlane vec @ (value_type (multi_lane 32 16)) (u8_from_uimm8 15)))
+                      (has_type $I32 (extractlane vec @ (value_type $I32X16) (u8_from_uimm8 15)))
                       address offset))
       (if-let true (has_avx512f))
       (if-let true (has_sse41))
@@ -1905,100 +2253,100 @@
 ;; -----------------------------------------------------------------------------
 
 ;; I32X16 insertlane lanes 0-3 (chunk 0)
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 0)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 0)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 0))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 0)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 0)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 1)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 1)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 0))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 1)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 0)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 2)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 2)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 0))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 2)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 0)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 3)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 3)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 0))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 3)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 0)))
 
 ;; I32X16 insertlane lanes 4-7 (chunk 1)
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 4)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 4)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 1))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 0)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 1)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 5)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 5)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 1))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 1)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 1)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 6)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 6)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 1))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 2)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 1)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 7)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 7)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 1))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 3)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 1)))
 
 ;; I32X16 insertlane lanes 8-11 (chunk 2)
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 8)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 8)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 2))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 0)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 2)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 9)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 9)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 2))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 1)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 2)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 10)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 10)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 2))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 2)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 2)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 11)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 11)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 2))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 3)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 2)))
 
 ;; I32X16 insertlane lanes 12-15 (chunk 3)
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 12)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 12)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 3))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 0)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 3)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 13)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 13)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 3))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 1)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 3)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 14)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 14)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 3))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 2)))
         (x64_512_vinserti32x4 (put_in_xmm vec) modified 3)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 32 16)) val (u8_from_uimm8 15)))
+(rule 17 (lower (insertlane vec @ (value_type $I32X16) val (u8_from_uimm8 15)))
       (if-let true (has_avx512f))
       (let ((chunk Xmm (x64_512_vextracti32x4 (put_in_xmm vec) 3))
             (modified Xmm (x64_pinsrd chunk (gpr_to_gpr_mem val) 3)))
@@ -2011,14 +2359,14 @@
 ;; -----------------------------------------------------------------------------
 
 ;; I64X8 insertlane lanes 0-1 (chunk 0)
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 0)))
+(rule 17 (lower (insertlane vec @ (value_type $I64X8) val (u8_from_uimm8 0)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 0))
             (modified Xmm (x64_pinsrq chunk (gpr_to_gpr_mem val) 0)))
         (x64_512_vinserti64x2 (put_in_xmm vec) modified 0)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 1)))
+(rule 17 (lower (insertlane vec @ (value_type $I64X8) val (u8_from_uimm8 1)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 0))
@@ -2026,14 +2374,14 @@
         (x64_512_vinserti64x2 (put_in_xmm vec) modified 0)))
 
 ;; I64X8 insertlane lanes 2-3 (chunk 1)
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 2)))
+(rule 17 (lower (insertlane vec @ (value_type $I64X8) val (u8_from_uimm8 2)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 1))
             (modified Xmm (x64_pinsrq chunk (gpr_to_gpr_mem val) 0)))
         (x64_512_vinserti64x2 (put_in_xmm vec) modified 1)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 3)))
+(rule 17 (lower (insertlane vec @ (value_type $I64X8) val (u8_from_uimm8 3)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 1))
@@ -2041,14 +2389,14 @@
         (x64_512_vinserti64x2 (put_in_xmm vec) modified 1)))
 
 ;; I64X8 insertlane lanes 4-5 (chunk 2)
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 4)))
+(rule 17 (lower (insertlane vec @ (value_type $I64X8) val (u8_from_uimm8 4)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 2))
             (modified Xmm (x64_pinsrq chunk (gpr_to_gpr_mem val) 0)))
         (x64_512_vinserti64x2 (put_in_xmm vec) modified 2)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 5)))
+(rule 17 (lower (insertlane vec @ (value_type $I64X8) val (u8_from_uimm8 5)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 2))
@@ -2056,19 +2404,58 @@
         (x64_512_vinserti64x2 (put_in_xmm vec) modified 2)))
 
 ;; I64X8 insertlane lanes 6-7 (chunk 3)
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 6)))
+(rule 17 (lower (insertlane vec @ (value_type $I64X8) val (u8_from_uimm8 6)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 3))
             (modified Xmm (x64_pinsrq chunk (gpr_to_gpr_mem val) 0)))
         (x64_512_vinserti64x2 (put_in_xmm vec) modified 3)))
 
-(rule 17 (lower (insertlane vec @ (value_type (multi_lane 64 8)) val (u8_from_uimm8 7)))
+(rule 17 (lower (insertlane vec @ (value_type $I64X8) val (u8_from_uimm8 7)))
       (if-let true (has_avx512f))
       (if-let true (has_avx512dq))
       (let ((chunk Xmm (x64_512_vextracti64x2 (put_in_xmm vec) 3))
             (modified Xmm (x64_pinsrq chunk (gpr_to_gpr_mem val) 1)))
         (x64_512_vinserti64x2 (put_in_xmm vec) modified 3)))
+
+;; -----------------------------------------------------------------------------
+;; F32X16 / F64X8 insertlane - float lanes stay entirely in XMM registers
+;; -----------------------------------------------------------------------------
+;; The integer insertlane rules above bounce the scalar through a GPR
+;; (PINSRD/Q), which would alias a Float-class vreg to an Int-class vreg for
+;; float values. Instead: extract the 128-bit chunk with VEXTRACTF32X4/
+;; VEXTRACTF64X2, insert the scalar within the chunk using the exact 128-bit
+;; float insertlane idioms from lower.isle (`f32x4_insertlane` helper /
+;; MOVSD/MOVLHPS), and reinsert with VINSERTF32X4/VINSERTF64X2.
+
+;; F32X16 insertlane: chunk = lane / 4, lane-in-chunk = lane % 4.
+(rule 17 (lower (insertlane vec @ (value_type $F32X16) val (u8_from_uimm8 lane)))
+      (if-let true (has_avx512f))
+      (let ((chunk_idx u8 (u8_wrapping_shr lane 2))
+            (chunk Xmm (x64_512_vextractf32x4 (put_in_xmm vec) chunk_idx))
+            (modified Xmm (f32x4_insertlane chunk (put_in_xmm val) (u8_and lane 3))))
+        (x64_512_vinsertf32x4 (put_in_xmm vec) modified chunk_idx)))
+
+;; F64X8 insertlane, even lane: MOVSD merges the low double of the chunk.
+;; VEXTRACTF64X2/VINSERTF64X2 require AVX-512DQ (guaranteed by F since commit
+;; c5f6a55176, but gated explicitly for consistency).
+(rule 18 (lower (insertlane vec @ (value_type $F64X8) val (u8_from_uimm8 lane)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (if-let 0 (u8_and lane 1))
+      (let ((chunk_idx u8 (u8_wrapping_shr lane 1))
+            (chunk Xmm (x64_512_vextractf64x2 (put_in_xmm vec) chunk_idx))
+            (modified Xmm (x64_movsd_regmove chunk (put_in_xmm val))))
+        (x64_512_vinsertf64x2 (put_in_xmm vec) modified chunk_idx)))
+
+;; F64X8 insertlane, odd lane: MOVLHPS writes the high double of the chunk.
+(rule 17 (lower (insertlane vec @ (value_type $F64X8) val (u8_from_uimm8 lane)))
+      (if-let true (has_avx512f))
+      (if-let true (has_avx512dq))
+      (let ((chunk_idx u8 (u8_wrapping_shr lane 1))
+            (chunk Xmm (x64_512_vextractf64x2 (put_in_xmm vec) chunk_idx))
+            (modified Xmm (x64_movlhps chunk (put_in_xmm val))))
+        (x64_512_vinsertf64x2 (put_in_xmm vec) modified chunk_idx)))
 
 ;; =============================================================================
 ;; 512-bit Rotate Left (rotl) - Scalar rotation broadcast to all elements
